@@ -1,0 +1,17 @@
+# --- Web framework (Phase 3) ---
+fastapi
+uvicorn[standard]
+
+# --- Document parsing (Phase 1) ---
+pypdf
+python-docx
+
+# --- Vector store (Phase 1) ---
+chromadb
+
+# --- LLM client ---
+anthropic
+
+# --- Utilities ---
+python-dotenv
+pydantic

@@ -1,0 +1,39 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+.venv/
+venv/
+env/
+*.log
+
+# --- Environment & secrets ---
+.env
+.env.local
+*.key
+
+# --- ChromaDB persistent storage (don't commit vector DB data) ---
+backend/chroma_db/
+backend/data/chroma/
+*.sqlite3
+
+# --- Uploaded documents (don't commit test PDFs/docs by default) ---
+backend/data/uploads/
+
+# --- Node / React (frontend, for later) ---
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.env
+
+# --- OS / Editor ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# --- Testing ---
+.pytest_cache/
+.coverage
+htmlcov/
