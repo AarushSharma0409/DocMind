@@ -1,8 +1,8 @@
 """
-test_chunker.py — Phase 1, Chunk 2 tests
+test_chunker.py - Phase 1, Chunk 2 tests
 
 WHY THIS EXISTS:
-chunker.py is the second link in the ingestion pipeline — if chunk
+chunker.py is the second link in the ingestion pipeline - if chunk
 boundaries are wrong, overlap doesn't actually overlap, or metadata
 (page_number/locator_type) doesn't propagate from loaders.py output into
 every resulting chunk, citations break in the same silent way the
@@ -39,7 +39,7 @@ from chunker import (
 
 
 # ---------------------------------------------------------------------------
-# Helpers — build text of a controlled, known token size so assertions
+# Helpers - build text of a controlled, known token size so assertions
 # can check against real numbers rather than vague "is it roughly right".
 # ---------------------------------------------------------------------------
 
@@ -79,7 +79,7 @@ def test_count_tokens_empty_string_is_minimal():
     """
     Empty string should produce a minimal token count. Note: in fallback
     mode (no tiktoken network access), count_tokens uses max(1, len//4),
-    so an empty string returns 1, not 0 — this floor exists to avoid
+    so an empty string returns 1, not 0 - this floor exists to avoid
     chunk_text() treating a near-empty unit as "free" to pack endlessly.
     With real tiktoken encoding, an empty string correctly encodes to 0
     tokens. Either way, the count must be small (<=1), never large.
@@ -100,7 +100,7 @@ def test_split_into_paragraphs_basic():
 def test_split_into_paragraphs_handles_messy_whitespace_between_blanks():
     """
     A blank 'line' with stray whitespace (not a perfectly clean \\n\\n)
-    should still be recognized as a paragraph break — this is the whole
+    should still be recognized as a paragraph break - this is the whole
     reason a regex is used instead of a plain string split.
     """
     text = "First paragraph.\n   \nSecond paragraph."
@@ -142,7 +142,7 @@ def test_split_into_sentences_single_sentence_returns_single_item():
 
 
 # ---------------------------------------------------------------------------
-# chunk_text — size limits and overlap
+# chunk_text - size limits and overlap
 # ---------------------------------------------------------------------------
 
 def test_chunk_text_small_input_produces_single_chunk():
@@ -165,7 +165,7 @@ def test_chunk_text_large_input_produces_multiple_chunks():
 
 def test_chunk_text_chunks_stay_within_size_limit():
     """
-    Every chunk should be at or near CHUNK_SIZE_TOKENS — not wildly over.
+    Every chunk should be at or near CHUNK_SIZE_TOKENS - not wildly over.
     Small tolerance allowed since the packing loop adds one unit at a
     time and may slightly exceed the limit before stopping.
     """
@@ -189,7 +189,7 @@ def test_chunk_text_consecutive_chunks_actually_overlap():
     """
     THE CORE OVERLAP TEST.
 
-    This proves overlap isn't just claimed in a docstring — it checks
+    This proves overlap isn't just claimed in a docstring - it checks
     that some real text content appears at the end of one chunk AND the
     start of the next chunk, which is what overlap is supposed to do.
     Without this test, a future refactor could silently break overlap
@@ -201,7 +201,7 @@ def test_chunk_text_consecutive_chunks_actually_overlap():
 
     # The last paragraph-sized unit of chunk N should reappear at the
     # start of chunk N+1. We check this by looking for a shared
-    # substring — specifically, the last "sentence" of chunk N.
+    # substring - specifically, the last "sentence" of chunk N.
     first_chunk_end = chunks[0][-100:]  # last ~100 chars of chunk 0
     second_chunk_start = chunks[1][:200]  # first ~200 chars of chunk 1
 
@@ -215,15 +215,15 @@ def test_chunk_text_consecutive_chunks_actually_overlap():
     )
     assert overlap_found, (
         "Expected at least one sentence from the end of chunk 0 to "
-        "reappear at the start of chunk 1 — overlap is not working."
+        "reappear at the start of chunk 1 - overlap is not working."
     )
 
 
 def test_chunk_text_oversized_single_paragraph_triggers_sentence_fallback():
     """
     A single paragraph (no blank lines at all) larger than
-    CHUNK_SIZE_TOKENS must still get split — via the sentence-level
-    fallback — rather than being returned as one giant oversized chunk.
+    CHUNK_SIZE_TOKENS must still get split - via the sentence-level
+    fallback - rather than being returned as one giant oversized chunk.
     """
     huge_paragraph = " ".join(
         f"This is sentence {i} in one giant paragraph with no breaks."
@@ -243,7 +243,7 @@ def test_chunk_text_empty_input_returns_empty_list():
 
 
 # ---------------------------------------------------------------------------
-# chunk_document — metadata propagation, the most important contract
+# chunk_document - metadata propagation, the most important contract
 # ---------------------------------------------------------------------------
 
 def test_chunk_document_propagates_page_number_to_every_chunk():
@@ -253,7 +253,7 @@ def test_chunk_document_propagates_page_number_to_every_chunk():
     When a single page is large enough to produce multiple chunks, every
     one of those chunks must still carry the correct page_number. This
     is the exact mechanism that keeps citations working once a page gets
-    split — losing this silently breaks every citation from a multi-chunk
+    split - losing this silently breaks every citation from a multi-chunk
     page.
     """
     large_text = make_multi_paragraph_text(30)
@@ -271,7 +271,7 @@ def test_chunk_document_propagates_page_number_to_every_chunk():
 def test_chunk_document_keeps_chunks_from_different_pages_separate():
     """
     Chunks from page 1 and page 2 should never report the wrong page
-    number — each chunk's metadata must match its true source page.
+    number - each chunk's metadata must match its true source page.
     """
     loaded_pages = [
         {"page_number": 1, "locator_type": "page", "text": make_multi_paragraph_text(2)},
@@ -290,7 +290,7 @@ def test_chunk_document_keeps_chunks_from_different_pages_separate():
 def test_chunk_document_preserves_locator_type_for_docx_source():
     """
     A page with locator_type="paragraph_index" (i.e. DOCX-sourced) must
-    keep that locator_type through chunking — chunking must not silently
+    keep that locator_type through chunking - chunking must not silently
     convert it to "page" or drop the field.
     """
     loaded_pages = [
@@ -304,7 +304,7 @@ def test_chunk_document_preserves_locator_type_for_docx_source():
 def test_chunk_document_assigns_unique_sequential_chunk_ids():
     """
     chunk_id should be a stable, unique, running index across the whole
-    document — used later as an identifier in ChromaDB.
+    document - used later as an identifier in ChromaDB.
     """
     loaded_pages = [
         {"page_number": 1, "locator_type": "page", "text": make_multi_paragraph_text(2)},
@@ -335,9 +335,30 @@ def test_chunk_document_page_with_no_extractable_chunks_contributes_nothing():
 
 
 def test_chunk_document_output_keys_match_expected_contract():
-    """Every chunk dict must have exactly these four keys — nothing missing, nothing extra."""
+    """Every chunk dict must have exactly these five keys - nothing missing, nothing extra."""
     loaded_pages = [{"page_number": 1, "locator_type": "page", "text": make_multi_paragraph_text(2)}]
     result = chunk_document(loaded_pages)
     assert len(result) > 0
-    expected_keys = {"chunk_id", "page_number", "locator_type", "text"}
+    expected_keys = {"chunk_id", "page_number", "locator_type", "source_file", "text"}
     assert set(result[0].keys()) == expected_keys
+
+
+def test_chunk_document_propagates_source_file_to_every_chunk():
+    """
+    source_file disambiguates chunks across documents in the same
+    ChromaDB collection - "page 4" is meaningless without knowing which
+    file. Every chunk from a document must carry its source filename.
+    """
+    large_text = make_multi_paragraph_text(30)
+    loaded_pages = [{"page_number": 1, "locator_type": "page", "text": large_text}]
+
+    result = chunk_document(loaded_pages, source_file="quarterly_report.pdf")
+    assert len(result) > 1, "Test setup must produce multiple chunks"
+    assert all(c["source_file"] == "quarterly_report.pdf" for c in result)
+
+
+def test_chunk_document_source_file_defaults_to_none():
+    """Existing callers that don't pass source_file shouldn't be forced to."""
+    loaded_pages = [{"page_number": 1, "locator_type": "page", "text": make_multi_paragraph_text(2)}]
+    result = chunk_document(loaded_pages)
+    assert all(c["source_file"] is None for c in result)
