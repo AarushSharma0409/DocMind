@@ -15,3 +15,7 @@ anthropic
 # --- Utilities ---
 python-dotenv
 pydantic
+
+# --- Testing (not needed for the app itself, only to run tests/) ---
+pytest
+reportlab

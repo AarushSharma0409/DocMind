@@ -1,10 +1,10 @@
 """
-loaders.py — Phase 1, Chunk 1
+loaders.py - Phase 1, Chunk 1
 
 WHY THIS EXISTS:
 Before we can chunk or embed anything, we need to extract raw text from
 documents while preserving WHERE that text came from (which page). This
-page-level metadata is what makes citations possible later — without it,
+page-level metadata is what makes citations possible later - without it,
 DocMind could only ever say "this came from somewhere in the document,"
 not "this came from page 4."
 
@@ -28,7 +28,7 @@ def load_pdf(file_path: str) -> list[dict]:
     Extract text from a PDF, one entry per page.
 
     Returns a list of dicts like:
-        [{"page_number": 1, "locator_type": "page", "text": "..."}, ...]
+        [{"page_number": 2, "locator_type": "page", "text": "..."}, ...]
 
     Pages with no extractable text (e.g. scanned images with no OCR) are
     skipped, not silently included as empty chunks later.
@@ -57,22 +57,33 @@ def load_docx(file_path: str) -> list[dict]:
     Extract text from a DOCX file, one entry per non-empty paragraph.
 
     WHY paragraph-level granularity instead of treating the whole doc as
-    one blob: DOCX files have no fixed page boundaries — "pages" depend
+    one blob: DOCX files have no fixed page boundaries - "pages" depend
     on fonts, margins, and the rendering engine. Paragraph index is the
     finest *deterministic* locator we can extract from the XML, and it
     gives downstream citation code a stable reference to point users back
     to a specific location in the source document.
 
     Returns a list of dicts like:
-        [{"page_number": 1, "locator_type": "paragraph_index", "text": "..."}, ...]
+        [{"page_number": 5, "locator_type": "paragraph_index", "text": "..."}, ...]
 
-    The "page_number" field holds the 1-indexed paragraph position.
+    The "page_number" field holds the 1-indexed paragraph position -
+    specifically, the paragraph's TRUE position among all paragraphs in
+    the document (same indexing principle as load_pdf's page_number),
+    not a count of only the non-empty ones. This matters for citation
+    traceability: if blank paragraphs were silently excluded from the
+    count, "page_number: 4" might not correspond to the actual 4th
+    paragraph in the file, and anyone verifying a citation by opening the
+    document and counting paragraphs would land on the wrong spot - a
+    silent, hard-to-detect error rather than an obvious one.
+
     "locator_type" tells downstream consumers this is a structural proxy,
-    not a true rendered page — so the citation UI can render "¶12"
+    not a true rendered page - so the citation UI can render "para. 12"
     instead of "Page 12".
 
     Empty paragraphs (whitespace-only, blank lines between sections) are
-    skipped, same rationale as load_pdf skipping pages with no text.
+    skipped from the *output*, same rationale as load_pdf skipping pages
+    with no text - but NOT skipped from the index count, since that
+    would break true-position traceability.
     """
     path = Path(file_path)
     if not path.exists():
@@ -81,17 +92,15 @@ def load_docx(file_path: str) -> list[dict]:
     doc = Document(str(path))
     paragraphs = []
 
+    # Use the TRUE index from enumerate (i + 1), same pattern as load_pdf's
+    # page_number. Gaps from skipped blank paragraphs are preserved, not
+    # compacted - see docstring above for why this matters.
     for i, para in enumerate(doc.paragraphs):
         text = para.text
         if text and text.strip():
             paragraphs.append({
-                # i + 1 keeps the TRUE position in the document, not a dense count.
-                # This matches load_pdf's pattern: if paragraphs 2 and 3 are blank,
-                # the next non-empty paragraph is still "¶4", not "¶2". Without this,
-                # citation traceability breaks — the user can't count to the right
-                # paragraph in the source file.
-                "page_number": i + 1,
-                "locator_type": "paragraph_index",  # not a true page — see docstring
+                "page_number": i + 1,  # true 1-indexed position, gaps preserved
+                "locator_type": "paragraph_index",  # not a true page - see docstring
                 "text": text.strip()
             })
 
@@ -99,16 +108,29 @@ def load_docx(file_path: str) -> list[dict]:
 
 
 if __name__ == "__main__":
-    # Quick manual test — run this file directly with a sample PDF to sanity check.
+    # Quick manual test - run this file directly with a sample file to sanity check.
     # Usage: python loaders.py path/to/test.pdf
+    #        python loaders.py path/to/test.docx
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python loaders.py <path_to_pdf>")
+        print("Usage: python loaders.py <path_to_pdf_or_docx>")
         sys.exit(1)
 
-    result = load_pdf(sys.argv[1])
-    print(f"Extracted {len(result)} pages with text.")
+    test_path = sys.argv[1]
+
+    if test_path.lower().endswith(".pdf"):
+        result = load_pdf(test_path)
+        label = "page"
+    elif test_path.lower().endswith(".docx"):
+        result = load_docx(test_path)
+        label = "paragraph"
+    else:
+        print("Unsupported file type - pass a .pdf or .docx file")
+        sys.exit(1)
+
+    print(f"Extracted {len(result)} {label}(s) with text.")
     if result:
-        print(f"--- Page {result[0]['page_number']} preview ---")
-        print(result[0]["text"][:300])
+        first = result[0]
+        print(f"--- {label.capitalize()} {first['page_number']} (locator_type={first['locator_type']}) preview ---")
+        print(first["text"][:300])
