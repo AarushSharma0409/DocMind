@@ -9,6 +9,10 @@ python-docx
 # --- Vector store (Phase 1) ---
 chromadb
 
+# --- Embeddings (Phase 1) ---
+sentence-transformers
+tiktoken
+
 # --- LLM client ---
 anthropic
 
