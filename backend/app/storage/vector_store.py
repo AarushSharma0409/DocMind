@@ -84,9 +84,30 @@ def get_collection(collection_name: str = DEFAULT_COLLECTION_NAME,
     Get (or create, if it doesn't exist yet) the ChromaDB collection
     DocMind stores chunks in. get_or_create_collection is idempotent -
     safe to call every time the app starts, won't wipe existing data.
+
+    WHY hnsw:space="cosine" IS EXPLICITLY SET: this is a real bug found
+    during Phase 2 development. ChromaDB's default distance metric, if
+    not explicitly configured, is SQUARED L2 (squared Euclidean)
+    distance, not cosine distance - confirmed by direct testing (an
+    orthogonal vector pair returned distance=2.0, and an opposite vector
+    pair returned distance=4.0, which only matches squared L2, not
+    cosine). This matters because retriever.py's similarity score
+    conversion (1 - distance) is only mathematically valid for cosine
+    distance, which has a bounded, predictable range. Without this
+    explicit setting, every computed "similarity" score was wrong
+    (returning near-zero for genuinely strong matches), even though
+    RESULT ORDERING still happened to be correct - which is why the bug
+    wasn't obvious from ranking alone and only showed up once actual
+    similarity scores were inspected. Cosine distance is also the
+    standard choice for text embeddings specifically (it measures
+    directional similarity, ignoring vector magnitude, which fits how
+    sentence-transformers models are designed to be compared).
     """
     client = get_client(persist_dir)
-    return client.get_or_create_collection(name=collection_name)
+    return client.get_or_create_collection(
+        name=collection_name,
+        metadata={"hnsw:space": "cosine"},
+    )
 
 
 def _build_record_id(chunk: dict) -> str:

@@ -1,11 +1,11 @@
-"""
-test_loaders.py - Phase 1, Chunk 1 tests
+﻿"""
+test_loaders.py — Phase 1, Chunk 1 tests
 
 WHY THIS EXISTS:
 loaders.py is the foundation everything else (chunking, embeddings,
 citations) gets built on top of. If page/paragraph numbering is wrong
 here, every citation DocMind ever shows will quietly point to the wrong
-place - and nothing will crash to tell you. These tests exist to catch
+place — and nothing will crash to tell you. These tests exist to catch
 that class of silent bug before it propagates.
 
 The most important test in this file is test_load_docx_preserves_true_position,
@@ -25,13 +25,13 @@ from loaders import load_pdf, load_docx
 
 
 # ---------------------------------------------------------------------------
-# Fixtures - build known-structure test files so we know the "correct"
+# Fixtures — build known-structure test files so we know the "correct"
 # answer before running anything, rather than just eyeballing output.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def simple_docx(tmp_path) -> str:
-    """A DOCX with no blanks - the easy case."""
+    """A DOCX with no blanks — the easy case."""
     path = tmp_path / "simple.docx"
     doc = DocxDocument()
     doc.add_paragraph("First paragraph.")
@@ -83,7 +83,7 @@ def pdf_with_blank_page(tmp_path) -> str:
     c = canvas.Canvas(str(path))
     c.drawString(100, 750, "Page one content")
     c.showPage()
-    # page two intentionally left blank - no drawString call
+    # page two intentionally left blank — no drawString call
     c.showPage()
     c.drawString(100, 750, "Page three content")
     c.showPage()
@@ -94,7 +94,7 @@ def pdf_with_blank_page(tmp_path) -> str:
 @pytest.fixture
 def empty_docx(tmp_path) -> str:
     """
-    A DOCX with only blank paragraphs - no real content anywhere.
+    A DOCX with only blank paragraphs — no real content anywhere.
     Simulates a realistic edge case: a user uploads a doc that's just
     whitespace, empty headers, or formatting with no actual text.
     Should return [] cleanly, not error or return malformed entries.
@@ -112,7 +112,7 @@ def empty_docx(tmp_path) -> str:
 def blank_pdf(tmp_path) -> str:
     """
     A PDF with pages but zero extractable text (nothing drawn on any page).
-    Simulates a scanned PDF with no OCR layer - a realistic real-world
+    Simulates a scanned PDF with no OCR layer — a realistic real-world
     case for a document upload feature. Should return [] cleanly.
     """
     path = tmp_path / "blank.pdf"
@@ -152,7 +152,7 @@ def test_load_pdf_page_numbers_are_one_indexed(simple_pdf):
 def test_load_pdf_skips_blank_pages_but_preserves_true_position(pdf_with_blank_page):
     """
     The middle page has no text. It should be excluded from the output,
-    but page 3's page_number should still read 3, not 2 - proving the
+    but page 3's page_number should still read 3, not 2 — proving the
     blank page wasn't silently compacted out of the numbering.
     """
     result = load_pdf(pdf_with_blank_page)
@@ -170,7 +170,7 @@ def test_load_pdf_raises_on_missing_file():
 def test_load_pdf_all_blank_returns_empty_list(blank_pdf):
     """
     A PDF with pages but no extractable text (e.g. a scanned PDF with no
-    OCR layer) should return an empty list cleanly - not error, and not
+    OCR layer) should return an empty list cleanly — not error, and not
     return malformed entries with empty/whitespace text.
     """
     result = load_pdf(blank_pdf)
@@ -209,12 +209,12 @@ def test_load_docx_preserves_true_position(docx_with_gaps):
     An earlier version of load_docx used a counter that only incremented
     on non-empty paragraphs. That made "page_number" a count of "how many
     non-blank paragraphs we've seen so far" rather than the paragraph's
-    actual position in the document. The bug was silent - no crash, no
-    error - it just meant every citation pointing past the first blank
+    actual position in the document. The bug was silent — no crash, no
+    error — it just meant every citation pointing past the first blank
     paragraph would be wrong by however many blanks preceded it.
 
     This test uses a file with known gaps (blanks at positions 2, 4, 5)
-    and asserts the real content lands at its TRUE positions: 1, 3, 6 -
+    and asserts the real content lands at its TRUE positions: 1, 3, 6 —
     not the compacted [1, 2, 3] the buggy version would have produced.
     """
     result = load_docx(docx_with_gaps)
@@ -235,7 +235,7 @@ def test_load_docx_empty_paragraphs_excluded_from_output(docx_with_gaps):
 def test_load_docx_all_blank_returns_empty_list(empty_docx):
     """
     A DOCX with only blank/whitespace paragraphs (no real content at all)
-    should return an empty list cleanly - a realistic case when a user
+    should return an empty list cleanly — a realistic case when a user
     uploads a doc that's just formatting or empty sections.
     """
     result = load_docx(empty_docx)
@@ -243,7 +243,7 @@ def test_load_docx_all_blank_returns_empty_list(empty_docx):
 
 
 # ---------------------------------------------------------------------------
-# Cross-loader consistency - both loaders must return the same shape so
+# Cross-loader consistency — both loaders must return the same shape so
 # downstream code (chunker, citation UI) can treat them uniformly.
 # ---------------------------------------------------------------------------
 
@@ -257,7 +257,7 @@ def test_pdf_and_docx_return_same_dict_keys(simple_pdf, simple_docx):
 
 def test_pdf_and_docx_return_same_value_types(simple_pdf, simple_docx):
     """
-    Same keys isn't enough - downstream code (chunker, citation UI) will
+    Same keys isn't enough — downstream code (chunker, citation UI) will
     also break if one loader returns page_number as a string and the
     other as an int, or if text comes back empty/None in either case.
     """
