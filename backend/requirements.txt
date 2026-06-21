@@ -13,10 +13,12 @@ chromadb
 sentence-transformers
 tiktoken
 
-# --- LLM client (Gemini & Groq, used for query routing and generation) ---
+# --- LLM client (Gemini, used for query routing and generation) ---
 google-genai
-google-generativeai
-groq
+
+# --- Optional fallback LLM client (see generator_groq_backup.py) ---
+# Uncomment if activating the Groq-based generator backup:
+# groq
 
 # --- Utilities ---
 python-dotenv
