@@ -13,8 +13,10 @@ chromadb
 sentence-transformers
 tiktoken
 
-# --- LLM client ---
-anthropic
+# --- LLM client (Gemini & Groq, used for query routing and generation) ---
+google-genai
+google-generativeai
+groq
 
 # --- Utilities ---
 python-dotenv
