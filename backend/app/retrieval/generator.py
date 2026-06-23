@@ -87,7 +87,7 @@ from google.genai import types
 _ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
 
-GENERATION_MODEL = "gemini-3.5-flash"
+GENERATION_MODEL = "gemini-2.0-flash"
 MAX_CHUNKS_IN_PROMPT = 5  # matches retriever.py's DEFAULT_TOP_K - kept as
                            # one source of truth, see note in generate()
 

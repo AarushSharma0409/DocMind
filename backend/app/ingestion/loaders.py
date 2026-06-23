@@ -1,5 +1,5 @@
 """
-loaders.py - Phase 1, Chunk 1
+loaders.py - Phase 1, Chunk 1 (updated with OCR fallback)
 
 WHY THIS EXISTS:
 Before we can chunk or embed anything, we need to extract raw text from
@@ -16,22 +16,105 @@ to a source.
 Each loader returns dicts with a "locator_type" field so downstream code
 (especially the citation UI in Phase 4) knows whether "page_number" is
 a true rendered page or a structural proxy like paragraph index.
+
+OCR FALLBACK (added Phase 3):
+Some PDFs contain scanned images rather than embedded text. pypdf returns
+an empty string for these pages. When that happens, load_pdf now falls
+back to OCR via Tesseract (pytesseract + pdf2image) on a per-page basis:
+- Pages with extractable text: fast path, no OCR
+- Pages with no extractable text: converted to image, run through OCR
+This means one PDF can mix text-based and image-based pages and both
+will be handled correctly.
+
+WHY HARDCODE THE TESSERACT PATH ON WINDOWS:
+pytesseract.pytesseract.tesseract_cmd lets us point directly at the
+executable rather than relying on it being on PATH. On Windows, PATH
+changes often don't propagate reliably across shells, making the
+hardcoded path the more robust choice for a dev environment.
 """
 
+import os
 from pathlib import Path
+
 from pypdf import PdfReader
 from docx import Document
+
+# --- OCR setup ---
+# Tesseract must be installed at the system level. On Windows it's not
+# always on PATH even after installation, so we point directly at the
+# executable. If the path is wrong or Tesseract isn't installed, OCR
+# will raise a clear TesseractNotFoundError rather than silently
+# returning empty text.
+try:
+    import pytesseract
+    from pdf2image import convert_from_path
+
+    # Windows default install location — adjust if you installed elsewhere
+    TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.exists(TESSERACT_PATH):
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+
+
+def _ocr_pdf_page(file_path: str, page_number: int) -> str:
+    """
+    Run OCR on a single page of a PDF and return the extracted text.
+
+    Args:
+        file_path:   Path to the PDF file.
+        page_number: 1-indexed page number to OCR.
+
+    Returns:
+        Extracted text string, or empty string if OCR produces nothing.
+
+    WHY PER-PAGE OCR, NOT WHOLE-DOCUMENT:
+    Converting the entire PDF to images upfront is memory-intensive for
+    large documents. Per-page conversion means we only pay the cost for
+    pages that actually need OCR — most documents are either fully
+    text-based (no OCR needed at all) or have just a few image pages.
+    """
+    if not OCR_AVAILABLE:
+        return ""
+
+    try:
+        # Convert only the specific page to an image (first_page and
+        # last_page are 1-indexed, matching our page_number convention)
+        images = convert_from_path(
+            file_path,
+            first_page=page_number,
+            last_page=page_number,
+            dpi=300,  # 300 DPI is the standard for readable OCR output;
+                      # lower DPI degrades accuracy, higher adds cost with
+                      # diminishing returns
+            poppler_path=r"C:\Program Files\poppler-26.02.0\Library\bin",
+        )
+        if not images:
+            return ""
+
+        text = pytesseract.image_to_string(images[0])
+        return text.strip()
+
+    except Exception:
+        # OCR failure on one page shouldn't crash the whole ingestion —
+        # return empty string and let the caller decide whether to skip.
+        return ""
 
 
 def load_pdf(file_path: str) -> list[dict]:
     """
     Extract text from a PDF, one entry per page.
 
+    For pages with extractable text (text-based PDFs), uses pypdf directly.
+    For pages with no extractable text (scanned/image PDFs), falls back to
+    Tesseract OCR via pdf2image if available.
+
     Returns a list of dicts like:
         [{"page_number": 2, "locator_type": "page", "text": "..."}, ...]
 
-    Pages with no extractable text (e.g. scanned images with no OCR) are
-    skipped, not silently included as empty chunks later.
+    Pages with no text after both extraction and OCR are skipped.
     """
     path = Path(file_path)
     if not path.exists():
@@ -41,13 +124,27 @@ def load_pdf(file_path: str) -> list[dict]:
     pages = []
 
     for i, page in enumerate(reader.pages):
+        page_number = i + 1  # 1-indexed, matches how humans reference pages
         text = page.extract_text()
+
         if text and text.strip():
+            # Fast path — page has real embedded text, no OCR needed
             pages.append({
-                "page_number": i + 1,  # 1-indexed, matches how humans reference pages
-                "locator_type": "page",  # true rendered page from the PDF
-                "text": text.strip()
+                "page_number": page_number,
+                "locator_type": "page",
+                "text": text.strip(),
             })
+        else:
+            # Fallback — page appears to be image-only, try OCR
+            ocr_text = _ocr_pdf_page(file_path, page_number)
+            if ocr_text:
+                pages.append({
+                    "page_number": page_number,
+                    "locator_type": "page",
+                    "text": ocr_text,
+                })
+            # If OCR also returns nothing, skip the page entirely —
+            # same behavior as the original loader for empty pages
 
     return pages
 
@@ -92,16 +189,13 @@ def load_docx(file_path: str) -> list[dict]:
     doc = Document(str(path))
     paragraphs = []
 
-    # Use the TRUE index from enumerate (i + 1), same pattern as load_pdf's
-    # page_number. Gaps from skipped blank paragraphs are preserved, not
-    # compacted - see docstring above for why this matters.
     for i, para in enumerate(doc.paragraphs):
         text = para.text
         if text and text.strip():
             paragraphs.append({
-                "page_number": i + 1,  # true 1-indexed position, gaps preserved
-                "locator_type": "paragraph_index",  # not a true page - see docstring
-                "text": text.strip()
+                "page_number": i + 1,
+                "locator_type": "paragraph_index",
+                "text": text.strip(),
             })
 
     return paragraphs
@@ -109,12 +203,12 @@ def load_docx(file_path: str) -> list[dict]:
 
 if __name__ == "__main__":
     # Quick manual test - run this file directly with a sample file to sanity check.
-    # Usage: python loaders.py path/to/test.pdf
-    #        python loaders.py path/to/test.docx
+    # Usage: python -m app.ingestion.loaders path/to/test.pdf
+    #        python -m app.ingestion.loaders path/to/test.docx
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python loaders.py <path_to_pdf_or_docx>")
+        print("Usage: python -m app.ingestion.loaders <path_to_file>")
         sys.exit(1)
 
     test_path = sys.argv[1]
@@ -132,5 +226,6 @@ if __name__ == "__main__":
     print(f"Extracted {len(result)} {label}(s) with text.")
     if result:
         first = result[0]
-        print(f"--- {label.capitalize()} {first['page_number']} (locator_type={first['locator_type']}) preview ---")
+        print(f"--- {label.capitalize()} {first['page_number']} "
+              f"(locator_type={first['locator_type']}) preview ---")
         print(first["text"][:300])
