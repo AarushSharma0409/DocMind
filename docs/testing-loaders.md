@@ -1,24 +1,27 @@
 # Testing Notes — `loaders.py`
 
 This documents what was tested in Phase 1, Chunk 1 (document loading) and why,
-including a real bug that was caught and fixed before this code shipped.
+including a real bug that was caught and fixed before this code shipped, and
+the OCR fallback added in Phase 3.
 
-> Note: this is a written record, not an automated test suite. For that, see
-> `tests/test_loaders.py` (if/when it exists in this repo).
+> This is a written record for context and interview prep. The actual
+> automated tests live in `tests/test_loaders.py` — run them with
+> `python -m pytest tests/test_loaders.py -v`.
 
 ---
 
 ## What `loaders.py` does
 
-Two functions, one shared contract:
+Three functions, one shared output contract:
 
 | Function | Input | Output shape |
 |---|---|---|
 | `load_pdf(file_path)` | `.pdf` | `[{"page_number": int, "locator_type": "page", "text": str}, ...]` |
 | `load_docx(file_path)` | `.docx` | `[{"page_number": int, "locator_type": "paragraph_index", "text": str}, ...]` |
+| `_ocr_pdf_page(file_path, page_number)` | `.pdf` + page index | `str` (OCR text for one page, internal helper) |
 
-Both return the same shape so downstream code (chunker, citation UI) can
-handle either source type without caring which loader produced it.
+All loaders return the same shape so downstream code (chunker, citation UI)
+can handle any source type without caring which loader produced it.
 
 ---
 
@@ -73,6 +76,35 @@ for i, para in enumerate(doc.paragraphs):
 
 ---
 
+## OCR fallback (added Phase 3)
+
+The original `load_pdf()` skipped pages with no extractable text — correct
+for digitally-created PDFs, but it meant scanned documents returned zero
+pages and were rejected at upload.
+
+**The fix:** a per-page OCR fallback using Tesseract + Poppler. If `pypdf`
+returns no text for a page, `_ocr_pdf_page()` converts that page to a 300
+DPI image and runs OCR on it. The output shape is identical to the
+text-extraction path — callers don't know or care which path ran.
+
+**Why per-page, not whole-document:** converting an entire PDF to images
+upfront holds all pages in memory simultaneously. Per-page means only pages
+that need OCR pay the cost. Most documents are fully text-based (no OCR
+calls at all) or fully scanned (all pages need it, but one at a time).
+
+**Why hardcoded paths:** Tesseract and Poppler PATH changes don't propagate
+reliably on Windows across shells and virtual environments. Hardcoding the
+executable paths (`pytesseract.pytesseract.tesseract_cmd` and
+`poppler_path=`) is the standard reliable pattern for Windows Python
+projects using Tesseract.
+
+**Graceful degradation:** if OCR fails for any reason, the exception is
+caught and the page is skipped — same behavior as a text-based empty page.
+The loader still works for text-based PDFs even if Tesseract/Poppler aren't
+installed (`OCR_AVAILABLE = False`).
+
+---
+
 ## Verification performed
 
 ### Test 1 — DOCX true-position indexing
@@ -93,15 +125,29 @@ counter would have produced).
 
 **Result:** ✅ Returned `[1, 3, 6]` — confirmed correct.
 
-### Test 2 — PDF still works after the edit
+### Test 2 — PDF text extraction still works
 Built a 2-page test PDF with known content on each page.
 
 **Expected:** `load_pdf` returns 2 entries, each with `locator_type: "page"`.
 
-**Result:** ✅ Returned both pages correctly, `locator_type` present and
-correct on every entry.
+**Result:** ✅ Returned both pages correctly.
 
-### Test 3 — File integrity
+### Test 3 — Scanned PDF via OCR (Phase 3)
+Uploaded `final_unit_3.pdf` — a 15-page fully scanned document with no
+embedded text layer. Previously rejected with "no extractable text."
+
+**Expected:** OCR extracts text from each page, 15 chunks stored.
+
+**Result:** ✅ `200 OK`, `chunks_stored: 15`. All pages processed via OCR.
+
+### Test 4 — Text-based PDF unaffected by OCR addition
+Uploaded `Transformers_Overview_3_Pages.pdf` — digitally created.
+
+**Expected:** Fast path (no OCR), 3 pages extracted.
+
+**Result:** ✅ 3 pages extracted correctly. OCR code never called.
+
+### Test 5 — File integrity
 Confirmed via checksum that the version tested was the exact version
 shared, no ambiguity about "which copy" was verified.
 
@@ -111,7 +157,10 @@ shared, no ambiguity about "which copy" was verified.
 
 `page_number` always means **true position in the source document** —
 gaps from skipped blank content are preserved, never compacted — for both
-loaders. This is what makes citations trustworthy: a user (or an
-interviewer asking "how do you know your citations are accurate?") can
-verify any returned `page_number` by opening the source file and counting
-to that exact spot.
+loaders. OCR pages use the same page numbering convention as text-based
+pages, so citations from scanned documents are just as traceable as those
+from digital ones.
+
+The OCR addition is worth calling out in an interview: scanned documents
+are extremely common in enterprise contexts, and a RAG system that silently
+rejects them is much less useful than one that handles them transparently.
