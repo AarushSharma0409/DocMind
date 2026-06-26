@@ -87,9 +87,13 @@ from google.genai import types
 _ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
 
-GENERATION_MODEL = "gemini-2.0-flash"
+GENERATION_MODEL = "gemini-2.5-flash"
+ANSWER_MODE_QA = "qa"
+ANSWER_MODE_SUMMARY = "summary"
+VALID_ANSWER_MODES = (ANSWER_MODE_QA, ANSWER_MODE_SUMMARY)
 MAX_CHUNKS_IN_PROMPT = 5  # matches retriever.py's DEFAULT_TOP_K - kept as
                            # one source of truth, see note in generate()
+MAX_SUMMARY_CHUNKS_IN_PROMPT = 25
 
 GENERATION_RESPONSE_SCHEMA = {
     "type": "object",
@@ -137,7 +141,9 @@ def get_client() -> "genai.Client":
     return _client
 
 
-def _build_generation_prompt(query: str, chunks: list[dict]) -> str:
+def _build_generation_prompt(query: str,
+                             chunks: list[dict],
+                             answer_mode: str = ANSWER_MODE_QA) -> str:
     """
     Build the generation prompt from the query and retrieved chunks.
 
@@ -159,15 +165,43 @@ def _build_generation_prompt(query: str, chunks: list[dict]) -> str:
 
     chunks_text = "\n\n".join(chunk_blocks)
 
-    return f"""You are a precise document QA assistant. Answer the user's query using ONLY the information in the chunks below.
+    shared_rules = f"""Use ONLY the information in the chunks below.
+Do not use outside knowledge.
+If the chunks do not contain enough information, say that plainly.
+Write in a natural, helpful style for a human reader, not like a keyword matcher.
+Synthesize related details across chunks instead of listing fragments.
+For every factual point, cite the supporting chunk using chunk_index.
+Only use chunk_index values from 0 to {len(chunks) - 1}. Never invent an index outside this range.
+For each citation, copy the most relevant sentence or phrase from that chunk verbatim as the excerpt."""
+
+    if answer_mode == ANSWER_MODE_SUMMARY:
+        task_rules = """The user is asking for a document-level summary or overview.
+Do not answer by searching for only the words in the query.
+Cover the document broadly using the provided chunks in document order.
+Make the answer easy to read with short sections:
+- A brief overall summary
+- Key points
+- Important details, numbers, decisions, or findings
+- Any limitations or missing context visible from the provided chunks
+If multiple documents are present, separate the summary by document.
+Avoid generic filler. Prefer concrete details from the document."""
+    else:
+        task_rules = """The user is asking a specific question about the documents.
+Start with the direct answer, then give the supporting details.
+If the answer is nuanced, explain the nuance in plain language.
+If several chunks disagree or describe different parts of the answer, reconcile them clearly.
+Do not simply repeat matching sentences unless that is the clearest answer."""
+
+    return f"""You are DocMind's document reading assistant.
+
+TASK MODE:
+{answer_mode}
 
 RULES:
-1. Base your answer strictly on the chunks provided. Do not use outside knowledge.
-2. If the chunks do not contain enough information to answer, say so explicitly in your answer.
-3. For every claim in your answer, cite which chunk it came from using "chunk_index" (the number in [CHUNK N] below).
-4. Only use chunk_index values that appear below (0 to {len(chunks) - 1}). Never invent an index outside this range.
-5. For each citation, copy the most relevant sentence or phrase from that chunk verbatim as the excerpt.
-6. A single chunk can be cited multiple times if multiple claims come from it.
+{shared_rules}
+
+MODE-SPECIFIC INSTRUCTIONS:
+{task_rules}
 
 USER QUERY:
 {query}
@@ -176,7 +210,9 @@ CHUNKS:
 {chunks_text}"""
 
 
-def generate(query: str, chunks: list[dict]) -> dict:
+def generate(query: str,
+             chunks: list[dict],
+             answer_mode: str = ANSWER_MODE_QA) -> dict:
     """
     Generate an answer with citations for the given query and retrieved
     chunks (as returned by retriever.py's retrieve()).
@@ -203,20 +239,22 @@ def generate(query: str, chunks: list[dict]) -> dict:
         raise ValueError("Query must be a non-empty string.")
     if not chunks:
         raise ValueError("At least one chunk must be provided for generation.")
+    if answer_mode not in VALID_ANSWER_MODES:
+        raise ValueError(f"answer_mode must be one of: {', '.join(VALID_ANSWER_MODES)}")
 
-    # WHY CAP HERE, NOT A SEPARATE CONSTANT REDEFINING THE SAME LIMIT:
-    # MAX_CHUNKS_IN_PROMPT intentionally mirrors retriever.py's
-    # DEFAULT_TOP_K (5) - in normal pipeline usage, retrieve() already
-    # returns at most top_k chunks, so this cap is a defensive backstop
-    # (e.g. if a caller passes more chunks from some other source), not
-    # the primary control. Capping in exactly one place here, rather
-    # than also re-capping inside the prompt builder, avoids two pieces
-    # of code disagreeing about what the limit is.
-    capped_chunks = chunks[:MAX_CHUNKS_IN_PROMPT]
+    # Normal QA uses a small, focused context from similarity retrieval.
+    # Summaries intentionally allow broader context because their job is
+    # to describe the document, not just answer from the nearest chunks.
+    max_chunks = (
+        MAX_SUMMARY_CHUNKS_IN_PROMPT
+        if answer_mode == ANSWER_MODE_SUMMARY
+        else MAX_CHUNKS_IN_PROMPT
+    )
+    capped_chunks = chunks[:max_chunks]
 
     try:
         client = get_client()
-        prompt = _build_generation_prompt(query, capped_chunks)
+        prompt = _build_generation_prompt(query, capped_chunks, answer_mode=answer_mode)
 
         response = client.models.generate_content(
             model=GENERATION_MODEL,

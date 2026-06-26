@@ -68,7 +68,7 @@ from google.genai import types
 _ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
 
-ROUTER_MODEL = "gemini-3.5-flash"
+ROUTER_MODEL = "gemini-2.5-flash"
 
 VALID_ROUTES = ("retrieve", "full_document", "no_retrieval")
 DEFAULT_FALLBACK_ROUTE = "retrieve"

@@ -212,6 +212,27 @@ def delete_by_source_file(source_file: str,
     collection.delete(where={"source_file": source_file})
 
 
+def delete_all_chunks(collection_name: str = DEFAULT_COLLECTION_NAME,
+                      persist_dir: str = DEFAULT_PERSIST_DIR) -> int:
+    """
+    Remove every stored chunk from the collection.
+
+    ChromaDB delete() is safest when called with explicit IDs, so this
+    fetches the current IDs first and deletes exactly those records.
+    Returns the number of chunks requested for deletion so API callers
+    can report what was cleared.
+    """
+    collection = get_collection(collection_name, persist_dir)
+    result = collection.get()
+    ids = result.get("ids") or []
+
+    if not ids:
+        return 0
+
+    collection.delete(ids=ids)
+    return len(ids)
+
+
 def count_chunks(collection_name: str = DEFAULT_COLLECTION_NAME,
                   persist_dir: str = DEFAULT_PERSIST_DIR) -> int:
     """Return the total number of chunks currently stored in the collection."""

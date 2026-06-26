@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import app.ingestion.embedder as embedder_module
 from app.ingestion.embedder import embed_chunks
 from app.storage.vector_store import store_chunks
-from app.retrieval.retriever import retrieve, _format_results
+from app.retrieval.retriever import retrieve, retrieve_document, _format_results
 
 
 class FakeModel:
@@ -247,6 +247,42 @@ def test_retrieve_distinguishes_chunks_from_different_source_files(store_dir):
     results = retrieve("churn question", persist_dir=store_dir)
     source_files = {r["source_file"] for r in results}
     assert source_files == {"report_a.pdf", "report_b.pdf"}
+
+
+def test_retrieve_document_returns_target_document_in_order(store_dir):
+    chunks = [
+        make_chunk(2, "Third chunk.", source_file="report.pdf", page_number=3),
+        make_chunk(0, "Other document.", source_file="notes.docx", page_number=1),
+        make_chunk(0, "First chunk.", source_file="report.pdf", page_number=1),
+        make_chunk(1, "Second chunk.", source_file="report.pdf", page_number=2),
+    ]
+    seed_store(store_dir, chunks)
+
+    results = retrieve_document("report.pdf", persist_dir=store_dir)
+
+    assert [r["text"] for r in results] == ["First chunk.", "Second chunk.", "Third chunk."]
+    assert {r["source_file"] for r in results} == {"report.pdf"}
+
+
+def test_retrieve_document_without_target_returns_all_documents(store_dir):
+    chunks = [
+        make_chunk(0, "Report chunk.", source_file="report.pdf"),
+        make_chunk(0, "Notes chunk.", source_file="notes.docx"),
+    ]
+    seed_store(store_dir, chunks)
+
+    results = retrieve_document(persist_dir=store_dir)
+
+    assert {r["source_file"] for r in results} == {"report.pdf", "notes.docx"}
+
+
+def test_retrieve_document_respects_max_chunks(store_dir):
+    chunks = [make_chunk(i, f"Chunk {i}.", source_file="report.pdf") for i in range(5)]
+    seed_store(store_dir, chunks)
+
+    results = retrieve_document("report.pdf", max_chunks=2, persist_dir=store_dir)
+
+    assert len(results) == 2
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ from app.ingestion.embedder import embed_chunks
 from app.storage.vector_store import (
     store_chunks,
     delete_by_source_file,
+    delete_all_chunks,
     get_collection,
     DEFAULT_COLLECTION_NAME,
 )
@@ -153,3 +154,47 @@ def list_documents():
         )
 
     return {"documents": documents, "count": len(documents)}
+
+
+@router.delete("/{source_file}")
+def delete_document(source_file: str):
+    """
+    Delete all stored chunks for one uploaded source file.
+
+    The frontend URL-encodes filenames before calling this endpoint, so
+    names with spaces still arrive here as the original filename.
+    """
+    try:
+        collection = get_collection(COLLECTION_NAME, PERSIST_DIR)
+        before = collection.count()
+        delete_by_source_file(source_file, COLLECTION_NAME, PERSIST_DIR)
+        deleted = before - collection.count()
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete document: {str(e)}",
+        )
+
+    return {
+        "message": "Document deleted.",
+        "filename": source_file,
+        "chunks_deleted": deleted,
+    }
+
+
+@router.delete("/")
+def clear_documents():
+    """Delete every stored chunk from the vector database."""
+    try:
+        deleted = delete_all_chunks(COLLECTION_NAME, PERSIST_DIR)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear documents: {str(e)}",
+        )
+
+    return {
+        "message": "All documents cleared.",
+        "chunks_deleted": deleted,
+    }

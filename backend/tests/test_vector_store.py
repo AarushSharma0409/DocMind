@@ -187,6 +187,27 @@ def test_delete_by_source_file_with_no_matching_chunks_is_a_no_op(store_dir):
     assert vs.count_chunks(persist_dir=store_dir) == 1
 
 
+def test_delete_all_chunks_removes_every_document(store_dir):
+    chunks = [
+        make_embedded_chunk(0, source_file="doc_a.pdf"),
+        make_embedded_chunk(1, source_file="doc_a.pdf"),
+        make_embedded_chunk(0, source_file="doc_b.pdf"),
+    ]
+    vs.store_chunks(chunks, persist_dir=store_dir)
+
+    deleted = vs.delete_all_chunks(persist_dir=store_dir)
+
+    assert deleted == 3
+    assert vs.count_chunks(persist_dir=store_dir) == 0
+
+
+def test_delete_all_chunks_on_empty_collection_returns_zero(store_dir):
+    deleted = vs.delete_all_chunks(persist_dir=store_dir)
+
+    assert deleted == 0
+    assert vs.count_chunks(persist_dir=store_dir) == 0
+
+
 # ---------------------------------------------------------------------------
 # Metadata sanitization - the None -> "unknown" conversion
 # ---------------------------------------------------------------------------

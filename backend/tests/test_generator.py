@@ -38,6 +38,8 @@ from app.retrieval.generator import (
     _parse_generation_response,
     GenerationError,
     MAX_CHUNKS_IN_PROMPT,
+    MAX_SUMMARY_CHUNKS_IN_PROMPT,
+    ANSWER_MODE_SUMMARY,
 )
 
 
@@ -150,6 +152,16 @@ class TestBuildPrompt:
         """The prompt should explicitly tell the model the valid chunk_index range."""
         prompt = _build_generation_prompt("query", multi_chunk)
         assert "0 to 2" in prompt
+
+    def test_summary_prompt_asks_for_broad_document_coverage(self, multi_chunk):
+        prompt = _build_generation_prompt(
+            "Summarize this document",
+            multi_chunk,
+            answer_mode=ANSWER_MODE_SUMMARY,
+        )
+        assert "document-level summary" in prompt
+        assert "Do not answer by searching for only the words in the query" in prompt
+        assert "Key points" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +320,22 @@ class TestGenerateMocked:
         assert f"[CHUNK {MAX_CHUNKS_IN_PROMPT - 1}]" in prompt_sent
         assert f"[CHUNK {MAX_CHUNKS_IN_PROMPT}]" not in prompt_sent
 
+    def test_summary_mode_allows_broader_context(self, monkeypatch):
+        import app.retrieval.generator as gen_module
+        fake_client = make_fake_client({"answer": "summary", "citations": []})
+        monkeypatch.setattr(gen_module, "get_client", lambda: fake_client)
+
+        many_chunks = [
+            {"text": f"text {i}", "source_file": "f.pdf", "page_number": i, "locator_type": "page"}
+            for i in range(MAX_SUMMARY_CHUNKS_IN_PROMPT + 5)
+        ]
+        generate("summarize this", many_chunks, answer_mode=ANSWER_MODE_SUMMARY)
+
+        call_kwargs = fake_client.models.generate_content.call_args.kwargs
+        prompt_sent = call_kwargs["contents"]
+        assert f"[CHUNK {MAX_SUMMARY_CHUNKS_IN_PROMPT - 1}]" in prompt_sent
+        assert f"[CHUNK {MAX_SUMMARY_CHUNKS_IN_PROMPT}]" not in prompt_sent
+
     def test_empty_query_raises_value_error(self, single_chunk):
         with pytest.raises(ValueError, match="non-empty"):
             generate("", single_chunk)
@@ -319,6 +347,10 @@ class TestGenerateMocked:
     def test_empty_chunks_raises_value_error(self):
         with pytest.raises(ValueError, match="At least one chunk"):
             generate("valid query", [])
+
+    def test_invalid_answer_mode_raises_value_error(self, single_chunk):
+        with pytest.raises(ValueError, match="answer_mode"):
+            generate("valid query", single_chunk, answer_mode="bad-mode")
 
     def test_api_failure_raises_generation_error(self, monkeypatch, single_chunk):
         """

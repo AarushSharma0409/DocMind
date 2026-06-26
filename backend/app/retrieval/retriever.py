@@ -59,6 +59,7 @@ from app.ingestion.embedder import get_model
 from app.storage.vector_store import get_collection, DEFAULT_COLLECTION_NAME, DEFAULT_PERSIST_DIR
 
 DEFAULT_TOP_K = 5
+DEFAULT_FULL_DOCUMENT_MAX_CHUNKS = 25
 
 
 def retrieve(query: str,
@@ -111,6 +112,58 @@ def retrieve(query: str,
     )
 
     return _format_results(results)
+
+
+def retrieve_document(source_file: str | None = None,
+                      max_chunks: int = DEFAULT_FULL_DOCUMENT_MAX_CHUNKS,
+                      collection_name: str = DEFAULT_COLLECTION_NAME,
+                      persist_dir: str = DEFAULT_PERSIST_DIR) -> list[dict]:
+    """
+    Return document chunks directly, without similarity-searching by the
+    user's query.
+
+    This is the retrieval path for whole-document tasks like "summarize
+    the PDF I uploaded". A vector query can only return the chunks most
+    semantically similar to the words in the prompt, which is exactly
+    the wrong shape for summaries: a summary needs broad coverage across
+    the document, in document order.
+    """
+    if max_chunks <= 0:
+        return []
+
+    collection = get_collection(collection_name, persist_dir)
+    if collection.count() == 0:
+        return []
+
+    get_kwargs = {"include": ["documents", "metadatas"]}
+    if source_file:
+        get_kwargs["where"] = {"source_file": source_file}
+
+    results = collection.get(**get_kwargs)
+    documents = results.get("documents") or []
+    metadatas = results.get("metadatas") or []
+
+    chunks = []
+    for text, metadata in zip(documents, metadatas):
+        chunks.append({
+            "text": text,
+            "source_file": metadata.get("source_file", "unknown"),
+            "page_number": metadata.get("page_number", 0),
+            "locator_type": metadata.get("locator_type", "page"),
+            "chunk_id": metadata.get("chunk_id", 0),
+            # Full-document retrieval is intentionally not similarity
+            # based. Use a neutral high score so the existing confidence
+            # layer does not misread broad context as weak vector search.
+            "similarity": 1.0,
+        })
+
+    chunks.sort(key=lambda c: (
+        str(c.get("source_file", "")),
+        c.get("page_number", 0),
+        c.get("chunk_id", 0),
+    ))
+
+    return chunks[:max_chunks]
 
 
 def _format_results(chroma_results: dict) -> list[dict]:

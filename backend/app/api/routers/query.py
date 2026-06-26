@@ -25,8 +25,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.retrieval.query_router import route_query
-from app.retrieval.retriever import retrieve, DEFAULT_COLLECTION_NAME, DEFAULT_PERSIST_DIR
-from app.retrieval.generator import generate, GenerationError
+from app.retrieval.retriever import (
+    retrieve,
+    retrieve_document,
+    DEFAULT_COLLECTION_NAME,
+    DEFAULT_PERSIST_DIR,
+)
+from app.retrieval.generator import generate, GenerationError, ANSWER_MODE_QA, ANSWER_MODE_SUMMARY
 from app.retrieval.confidence import assess_confidence
 from app.storage.vector_store import get_collection
 
@@ -97,7 +102,25 @@ def query_documents(request: QueryRequest):
 
     # --- 4. Retrieve ---
     try:
-        chunks = retrieve(query, collection_name=COLLECTION_NAME, persist_dir=PERSIST_DIR)
+        if route == "full_document":
+            # If the user says "summarize the PDF I uploaded" and only
+            # one document exists, treat that as the target document.
+            # With multiple documents and no explicit target, summarize
+            # across all uploaded documents instead of falling back to a
+            # keyword-style vector search.
+            target_document = routing.get("target_document")
+            if target_document is None and len(available_docs) == 1:
+                target_document = available_docs[0]
+
+            chunks = retrieve_document(
+                target_document,
+                collection_name=COLLECTION_NAME,
+                persist_dir=PERSIST_DIR,
+            )
+            answer_mode = ANSWER_MODE_SUMMARY
+        else:
+            chunks = retrieve(query, collection_name=COLLECTION_NAME, persist_dir=PERSIST_DIR)
+            answer_mode = ANSWER_MODE_QA
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -122,7 +145,7 @@ def query_documents(request: QueryRequest):
 
     # --- 6. Generate ---
     try:
-        generation = generate(query, chunks)
+        generation = generate(query, chunks, answer_mode=answer_mode)
     except GenerationError as e:
         # Generation failed — still return confidence so the user knows
         # whether retrieval was the problem or something else.
