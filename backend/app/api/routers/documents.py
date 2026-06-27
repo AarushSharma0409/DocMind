@@ -1,21 +1,47 @@
 """
 documents.py — Phase 3, document endpoints
 
-POST /documents/upload  — accepts a PDF or DOCX file, runs the full
-                          ingestion pipeline, stores chunks in ChromaDB
+POST /documents/upload  — accepts a PDF, DOCX, or TXT file, immediately
+                          returns 202 Accepted, then runs ingestion in
+                          the background
 GET  /documents/        — lists all unique source files in ChromaDB
+DELETE /documents/{filename} — removes one document's chunks
+DELETE /documents/      — removes all chunks
 
-WHY THESE TWO ENDPOINTS TOGETHER:
-The upload endpoint is the entry point to the entire ingestion pipeline.
-The list endpoint lets the frontend (and you, during development) verify
-what's actually been stored — without it, the store is a black box.
+INGESTION SPEED OPTIMIZATION:
+The original design ran the full pipeline (load → chunk → embed → store)
+synchronously inside the upload request, so the user's browser sat
+waiting through all of it — typically 3–8 seconds for a normal PDF.
+The bottleneck is model.encode() in embedder.py, which is CPU-bound and
+can't be made meaningfully faster without changing the model.
+
+The fix: FastAPI's BackgroundTasks. The upload endpoint now:
+  1. Validates the file type and reads the bytes — fast, stays sync
+  2. Returns 202 Accepted immediately — the browser unblocks
+  3. Runs the pipeline in a background task after the response is sent
+
+The frontend already polls GET /documents/ to show "Indexing..." vs
+"Indexed" status, so this fits the existing UI contract perfectly — the
+document appears as "Indexing…" instantly, then transitions to "Indexed"
+once the background task finishes, typically a few seconds later.
+
+WHY BackgroundTasks AND NOT asyncio / threading DIRECTLY:
+FastAPI's BackgroundTasks runs after the response is sent, in the same
+process, using Starlette's built-in task runner. It's the right tool
+for "do this after responding" — simpler than spinning up a thread pool
+or a task queue (Celery, RQ) for a workload this size. The tradeoff is
+that the task shares the process with request handlers, so a very
+slow ingestion (large scanned PDF with OCR) could theoretically slow
+down concurrent requests. For a portfolio project that won't see
+concurrent heavy ingestion, this is the correct call. A production
+system with many simultaneous users would want a proper task queue.
 """
 
 import os
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 
 from app.ingestion.loaders import load_pdf, load_docx
@@ -31,28 +57,84 @@ from app.storage.vector_store import (
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
-# Supported file types — anything else is rejected at the boundary,
-# before any pipeline work is done.
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 
-# ChromaDB config — these two values must be consistent everywhere:
-# upload, query, and list all need to point at the same store.
-# Path is resolved relative to this file so it works regardless of
-# which directory uvicorn is launched from.
 PERSIST_DIR = str(Path(__file__).resolve().parent.parent.parent.parent / "chroma_store")
 COLLECTION_NAME = DEFAULT_COLLECTION_NAME
 
 
-@router.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
+def _run_ingestion(tmp_path: str, suffix: str, filename: str) -> None:
     """
-    Accepts a PDF or DOCX file, runs the full ingestion pipeline, and
-    stores the resulting chunks in ChromaDB.
+    Full ingestion pipeline, intended to run as a background task.
 
-    If the same filename was uploaded before, its existing chunks are
-    deleted first — re-upload always replaces, never duplicates.
+    Reads from a temp file written by the upload endpoint, runs
+    load → chunk → embed → store, then cleans up the temp file.
+    Errors are logged but not raised — a background task can't send an
+    HTTP response, so there's no way to surface failures to the caller
+    after 202 has already been sent. The document simply won't appear
+    as "Indexed" in the list endpoint if ingestion fails.
+
+    NOTE: for a production system, you'd want to write failure state
+    somewhere the frontend can poll (e.g. a status endpoint or a DB
+    record), so users know when ingestion actually failed. For this
+    portfolio project, the tradeoff is accepted — the common path works
+    cleanly, and failures are visible in the server logs.
     """
-    # --- 1. Validate file type up front ---
+    try:
+        # Load
+        if suffix == ".pdf":
+            pages = load_pdf(tmp_path)
+        elif suffix == ".docx":
+            pages = load_docx(tmp_path)
+        else:
+            text = Path(tmp_path).read_text(encoding="utf-8", errors="replace")
+            pages = [{"page_number": 1, "locator_type": "page", "text": text}]
+
+        if not pages:
+            print(f"[ingestion] {filename}: no extractable text, skipping")
+            return
+
+        # Chunk
+        chunks = chunk_document(pages, source_file=filename)
+        if not chunks:
+            print(f"[ingestion] {filename}: produced no chunks, skipping")
+            return
+
+        # Embed — this is the slow step (CPU-bound model.encode)
+        embedded = embed_chunks(chunks)
+
+        # Store — delete existing chunks first to avoid duplicates on re-upload
+        delete_by_source_file(filename, COLLECTION_NAME, PERSIST_DIR)
+        stored = store_chunks(embedded, COLLECTION_NAME, PERSIST_DIR)
+
+        print(f"[ingestion] {filename}: stored {stored} chunks ✓")
+
+    except Exception as e:
+        print(f"[ingestion] {filename}: FAILED — {e}")
+
+    finally:
+        # Always clean up the temp file
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+@router.post("/upload", status_code=202)
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+):
+    """
+    Accept a file, validate it, then immediately return 202 and kick off
+    ingestion as a background task.
+
+    The response comes back in ~50ms (just file read + temp write).
+    Actual ingestion (chunking, embedding, storage) happens after the
+    response is sent and takes a few seconds in the background.
+
+    The frontend shows "Indexing…" on the document card until GET
+    /documents/ confirms the file is present in ChromaDB.
+    """
+    # Validate file type at the boundary — before reading anything
     suffix = Path(file.filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
@@ -60,67 +142,24 @@ async def upload_document(file: UploadFile = File(...)):
             detail=f"Unsupported file type '{suffix}'. Accepted: {sorted(SUPPORTED_EXTENSIONS)}",
         )
 
-    tmp_path = None
-    try:
-        # --- 2. Write upload to a temp file so loaders can read from disk ---
-        # loaders.py expects a file path, not a bytes stream.
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            contents = await file.read()
-            tmp.write(contents)
-            tmp_path = tmp.name
+    # Write to temp file — loaders need a path, not a byte stream.
+    # We can't use a context manager here because the file must persist
+    # until the background task finishes reading it.
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        contents = await file.read()
+        tmp.write(contents)
+        tmp_path = tmp.name
 
-        # --- 3. Load ---
-        if suffix == ".pdf":
-            pages = load_pdf(tmp_path)
-        elif suffix == ".docx":
-            pages = load_docx(tmp_path)
-        else:
-            # .txt — no dedicated loader needed. Read the whole file as one
-            # "page" in the same shape load_pdf/load_docx return, so the
-            # rest of the pipeline (chunker, embedder) needs no changes.
-            text = Path(tmp_path).read_text(encoding="utf-8", errors="replace")
-            pages = [{"page_number": 1, "locator_type": "page", "text": text}]
-
-        if not pages:
-            raise HTTPException(
-                status_code=422,
-                detail="File was parsed but contained no extractable text.",
-            )
-
-        # --- 4. Chunk ---
-        chunks = chunk_document(pages, source_file=file.filename)
-
-        if not chunks:
-            raise HTTPException(
-                status_code=422,
-                detail="Document was loaded but produced no chunks after splitting.",
-            )
-
-        # --- 5. Embed ---
-        embedded = embed_chunks(chunks)
-
-        # --- 6. Store — delete existing chunks first to avoid duplicates ---
-        delete_by_source_file(file.filename, COLLECTION_NAME, PERSIST_DIR)
-        stored = store_chunks(embedded, COLLECTION_NAME, PERSIST_DIR)
-
-    except HTTPException:
-        raise  # let our own HTTPExceptions pass through untouched
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Ingestion failed: {str(e)}",
-        )
-    finally:
-        # Always clean up the temp file, even if ingestion failed
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+    # Queue the pipeline to run after this response is sent.
+    # tmp_path cleanup happens inside _run_ingestion's finally block.
+    background_tasks.add_task(_run_ingestion, tmp_path, suffix, file.filename)
 
     return JSONResponse(
-        status_code=200,
+        status_code=202,
         content={
-            "message": "Document ingested successfully.",
+            "message": "File accepted. Ingestion running in background.",
             "filename": file.filename,
-            "chunks_stored": stored,
+            "status": "indexing",
         },
     )
 
@@ -128,17 +167,17 @@ async def upload_document(file: UploadFile = File(...)):
 @router.get("/")
 def list_documents():
     """
-    Returns a list of all unique source files currently stored in ChromaDB.
+    Returns all unique source files currently stored in ChromaDB.
 
-    Useful for the frontend to show what documents are available to query,
-    and during development to verify uploads are landing correctly.
+    This is also what the frontend polls to detect when a background
+    ingestion has completed — a file appears here only after its chunks
+    are fully stored.
     """
     try:
         collection = get_collection(COLLECTION_NAME, PERSIST_DIR)
         result = collection.get(include=["metadatas"])
         metadatas = result.get("metadatas") or []
 
-        # Extract unique source_file values, preserving insertion order
         seen = set()
         documents = []
         for meta in metadatas:
@@ -158,12 +197,7 @@ def list_documents():
 
 @router.delete("/{source_file}")
 def delete_document(source_file: str):
-    """
-    Delete all stored chunks for one uploaded source file.
-
-    The frontend URL-encodes filenames before calling this endpoint, so
-    names with spaces still arrive here as the original filename.
-    """
+    """Delete all stored chunks for one source file."""
     try:
         collection = get_collection(COLLECTION_NAME, PERSIST_DIR)
         before = collection.count()
