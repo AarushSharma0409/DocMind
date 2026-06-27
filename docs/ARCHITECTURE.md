@@ -29,14 +29,14 @@ FastAPI API layer
     ├── GET  /documents/        — list ingested documents
     └── POST /query/            — full RAG pipeline, returns answer + citations + confidence
     ↓
-Cited response + confidence level → React frontend (Phase 4)
+Cited response + confidence level → React frontend
 ```
 
 ---
 
 ## Phase 1 — Document Ingestion & Chunking
 
-**Status:** Complete
+**Status:** ✅ Complete
 
 ### What it does
 
@@ -49,7 +49,7 @@ and where in that file it lives.
 
 All loaders return the same output shape:
 
-```
+```python
 [{"page_number": int, "locator_type": str, "text": str}, ...]
 ```
 
@@ -59,7 +59,7 @@ produced the data. The `locator_type` field encodes the difference:
 - PDFs use `"page"` — real, fixed page numbers that match what the user sees.
 - DOCX files use `"paragraph_index"` — because Word pages depend on fonts and
   margins not stored in the file, so true page numbers are unavailable. Paragraph
-  position is a stable proxy that the citation UI (Phase 4) can render as `"¶12"`.
+  position is a stable proxy that the citation UI can render as `"¶12"`.
 - TXT files use `"page"` with `page_number: 1` — treated as a single page.
 
 **Bug caught before shipping:** the original DOCX loader used a dense counter
@@ -133,7 +133,7 @@ similarity scores were all returning `0.0`.
 
 ## Phase 2 — Retrieval, Query Routing & Generation
 
-**Status:** Complete
+**Status:** ✅ Complete
 
 ### Query Router (`query_router.py`)
 
@@ -195,13 +195,17 @@ inside `generate()` would silence that signal on every generation failure.
 **Single-chunk rule:** one highly similar chunk gets `"medium"` not `"high"` —
 it could be a precise answer or the only partial hit in a weak retrieval.
 
+**Max, not average:** `assess_confidence()` uses `max(similarities)`. One strong
+hit among weak ones means something relevant was found — averaging would
+incorrectly drag the score down and signal low confidence.
+
 **Pure function:** no API calls, no I/O. 32 tests run in under 0.1 seconds.
 
 ---
 
 ## Phase 3 — API Layer
 
-**Status:** Complete
+**Status:** ✅ Complete
 
 ### What it does
 
@@ -264,9 +268,69 @@ frontend domain in production.
 
 ## Phase 4 — Frontend
 
-**Status:** Not started
+**Status:** ✅ Complete
 
-_To be filled in: UI decisions, how citations and confidence are surfaced._
+### What it does
+
+A single-page React workspace with two panels: document management on the left,
+an interactive chat assistant on the right. Built on a Lovable-generated base
+(`hero-hues-shine`) using TanStack Router, then extended with all DocMind-specific
+functionality.
+
+### Stack
+
+- **TanStack Router** — file-based routing, `/workspace` route for the main UI
+- **Framer Motion** — upload zone animations, message entry, confidence badge reveal
+- **shadcn/ui + Tailwind v4** — component primitives and utility classes
+- **Video background** — ambient looping video with fade-in/fade-out at clip boundaries
+
+### Left panel — Document Center
+
+- Drag-and-drop upload zone backed by an `<input type="file">` (not a bare `div`)
+  so the label remains fully accessible and clickable
+- Upload progress bar via `XMLHttpRequest` `onprogress` — `fetch` doesn't expose
+  upload progress
+- Per-document indexed/indexing status badge
+- Per-document delete with spinner during in-flight request
+- Clear all with confirmation step before the destructive action
+- Documents load from `GET /documents/` on mount and stay in sync with uploads/deletes
+
+### Right panel — Interactive Assistant
+
+- Chat history with user and assistant bubbles, Framer Motion entry animations
+- Typing indicator with staggered dot animation while awaiting response
+- **Confidence badge** — `high / medium / low` with color coding (emerald/amber/rose),
+  animated in with a spring scale effect
+- **Citations panel** — collapsible per-message, each citation shows filename and page
+  number. Opening citations dispatches a `docmind:highlight` custom event — the left
+  panel listens and highlights the relevant document card, scrolling it into view
+- Quick-prompt chips for common queries
+- `Enter` to send, `Shift+Enter` pass-through for future multiline support
+
+### API integration decisions
+
+**`crypto.randomUUID()` replaced with `genId()`** — `crypto.randomUUID()` requires
+HTTPS (or localhost). The app runs on plain `http://` in development, which would
+throw silently or crash in some browsers. A `Math.random() + Date.now()` fallback
+is collision-resistant enough for UI keys.
+
+**Response parsing** — the query response shape from FastAPI is
+`{answer, citations, confidence: {level, reason}, route}`. The frontend maps
+`confidence.level` → `"high" | "medium" | "low"` and normalizes the citation
+fields (`source_file` → `source`, `page_number` → `page`) for display.
+
+**Backend status polling** — `GET /documents/` is polled every 15 seconds and used
+as a liveness check. The header shows an animated green/amber/red pill.
+
+### Visual design decisions
+
+- **Dark glass aesthetic** — near-transparent panels (`bg-white/[0.015]`) over a
+  looping video background. No `backdrop-blur` on any component — removed to keep
+  the background fully visible.
+- **Violet accent** — send button, drag-over glow, citation number badges, highlighted
+  document cards all use `violet-400/500` for visual consistency.
+- **Zero decoration on the functional chrome** — the header, status pill, and panel
+  borders are intentionally quiet so the video and chat content dominate.
 
 ---
 
@@ -274,7 +338,8 @@ _To be filled in: UI decisions, how citations and confidence are surfaced._
 
 **Status:** Not started
 
-_To be filled in: deployment setup, production considerations._
+*To be filled in: Dockerization, deployment target, production considerations
+(ChromaDB persistence on the target platform, secrets management, OCR binary paths).*
 
 ---
 
@@ -304,6 +369,11 @@ _To be filled in: deployment setup, production considerations._
 | Confidence output | Three named levels | Explicit judgment in one place; raw float pushes interpretation into UI |
 | Confidence placement | Separate module | API can surface it even when generation fails |
 | Confidence metric | Max similarity | One strong hit means something relevant was found |
-| Confidence before generation | Assessed first in pipeline | Signal survives `GenerationError` — verified in practice with Gemini 429 |
+| Confidence ordering | Assessed before generation | Signal survives `GenerationError` — verified in practice with Gemini 429 |
 | Re-upload behavior | Replace, not reject | Delete existing chunks then re-ingest; no silent duplication |
 | CSV/XLSX support | Excluded | Tabular rows embed poorly; needs row-to-sentence serialization before being RAG-ready |
+| Upload progress | `XMLHttpRequest` | `fetch` API does not expose upload progress events |
+| UUID generation | Custom `genId()` | `crypto.randomUUID()` requires HTTPS; fails in plain HTTP dev environments |
+| Confidence badge placement | Per-message, frontend | Each answer carries its own confidence signal, not a global state |
+| Citation highlight | Custom DOM event | Decouples chat panel from document panel without prop drilling or shared state |
+| `backdrop-blur` | Removed from all panels | Keeps video background fully visible; glass effect achieved through opacity alone |
