@@ -21,8 +21,10 @@ first means that signal is never lost to a downstream failure.
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+
+from app.api.main import limiter
 
 from app.retrieval.query_router import route_query
 from app.retrieval.retriever import (
@@ -47,7 +49,8 @@ class QueryRequest(BaseModel):
 
 
 @router.post("/")
-def query_documents(request: QueryRequest):
+@limiter.limit("20/minute")
+def query_documents(request: Request, body: QueryRequest):
     """
     Run a query through the full RAG pipeline.
 
@@ -60,7 +63,7 @@ def query_documents(request: QueryRequest):
             "confidence": {"level": "high"|"medium"|"low", "reason": str}
         }
     """
-    query = request.query.strip()
+    query = body.query.strip()
     if not query:
         raise HTTPException(status_code=422, detail="Query must not be empty.")
 

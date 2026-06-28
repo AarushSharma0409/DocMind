@@ -8,26 +8,32 @@ a record of *why* each decision was made, so it can double as interview prep lat
 ## System Overview
 
 ```
-React frontend
-    ↓
-FastAPI backend
+React frontend (workspace.tsx)
+    ↓  HTTP + X-API-Key header
+FastAPI backend (main.py)
+    ├── Auth middleware        — X-API-Key checked on every request
+    ├── Rate limiter           — slowapi, per-endpoint per-IP limits
     ↓
 Document ingestion pipeline
     ├── loaders.py      — PDF (text + OCR fallback) / DOCX / TXT parsing
     ├── chunker.py      — token-based splitting with overlap
-    ├── embedder.py     — local sentence-transformers model
+    ├── embedder.py     — local sentence-transformers model (eager-loaded at startup)
     └── vector_store.py — ChromaDB persistent storage
     ↓
 Query pipeline
     ├── query_router.py  — Gemini classifies: retrieve / full_document / no_retrieval
     ├── retriever.py     — cosine similarity search in ChromaDB
-    ├── generator.py     — Gemini synthesizes answer with citations
-    └── confidence.py    — judges retrieval quality, signals low confidence
+    ├── confidence.py    — judges retrieval quality before generation
+    └── generator.py     — Gemini synthesizes answer with citations
     ↓
 FastAPI API layer
-    ├── POST /documents/upload  — ingest PDF / DOCX / TXT
+    ├── POST /documents/upload  — validate + ingest (202, background task)
     ├── GET  /documents/        — list ingested documents
-    └── POST /query/            — full RAG pipeline, returns answer + citations + confidence
+    ├── GET  /documents/status  — per-file ingestion status (indexing/indexed/failed)
+    ├── DELETE /documents/{f}   — remove one document
+    ├── DELETE /documents/      — remove all documents
+    ├── POST /query/            — full RAG pipeline
+    └── GET  /health            — liveness check (no auth required)
     ↓
 Cited response + confidence level → React frontend
 ```
@@ -67,12 +73,10 @@ that only incremented on non-empty paragraphs, producing positions `[1, 2, 3]`
 instead of true positions `[1, 3, 6]` when blank paragraphs were skipped. Fixed
 by using `enumerate()` to preserve true position regardless of blank gaps.
 
-**OCR fallback (added Phase 3):** scanned PDFs contain images of text rather
-than embedded text — `pypdf` returns empty strings for these pages. `load_pdf()`
-now detects image-only pages and runs Tesseract OCR via `pdf2image` as a
-per-page fallback. Text-based pages still take the fast path with no OCR
-overhead. A 15-page fully scanned document was successfully ingested and queried
-end-to-end after this addition.
+**OCR fallback:** scanned PDFs contain images of text rather than embedded text —
+`pypdf` returns empty strings for these pages. `load_pdf()` detects image-only
+pages and runs Tesseract OCR via `pdf2image` as a per-page fallback. Text-based
+pages still take the fast path with no OCR overhead.
 
 ### Chunker (`chunker.py`)
 
@@ -109,9 +113,11 @@ Free, no API key, no per-call cost. Produces 384-dimensional vectors. The
 module isolates this decision — swapping to a hosted model later requires
 changing only `embedder.py`.
 
-**Lazy singleton:** the model loads once per process on first call and is
-reused. Loading a transformer model takes real seconds; reloading it on every
-embed call would make ingestion unusably slow.
+**Lazy singleton → Eager startup load:** the model was originally loaded lazily
+on first use. This made the first upload pay a 2–5 second model-load cost on top
+of ingestion time. Fixed by calling `get_model()` in FastAPI's lifespan hook at
+startup — the model is ready before the first request arrives, and every upload
+after that pays zero load cost.
 
 ### Vector Store (`vector_store.py`)
 
@@ -186,8 +192,8 @@ working-directory-independent.
 Reads retrieval output and returns a judgment about how much to trust the answer.
 
 **Why a separate module:** if `generate()` raises `GenerationError`, the API
-still needs to tell the user "retrieval quality was low." Burying confidence
-inside `generate()` would silence that signal on every generation failure.
+still needs to tell the user something meaningful. Burying confidence inside
+`generate()` would silence that signal on every generation failure.
 
 **Thresholds:** `HIGH_SIMILARITY_THRESHOLD = 0.65`, `LOW_SIMILARITY_THRESHOLD = 0.35`,
 `MIN_CHUNKS_FOR_HIGH_CONFIDENCE = 2`. Named constants, not magic numbers.
@@ -195,9 +201,9 @@ inside `generate()` would silence that signal on every generation failure.
 **Single-chunk rule:** one highly similar chunk gets `"medium"` not `"high"` —
 it could be a precise answer or the only partial hit in a weak retrieval.
 
-**Max, not average:** `assess_confidence()` uses `max(similarities)`. One strong
-hit among weak ones means something relevant was found — averaging would
-incorrectly drag the score down and signal low confidence.
+**Max, not average:** uses `max(similarities)`. One strong hit among weak ones
+means something relevant was found — averaging would incorrectly drag the score
+down and signal low confidence.
 
 **Pure function:** no API calls, no I/O. 32 tests run in under 0.1 seconds.
 
@@ -207,32 +213,40 @@ incorrectly drag the score down and signal low confidence.
 
 **Status:** ✅ Complete
 
-### What it does
-
-Three FastAPI endpoints that wire the ingestion and query pipelines together
-and expose them over HTTP for the React frontend.
-
 ### Endpoints
 
 ```
-POST /documents/upload  — ingest a PDF, DOCX, or TXT file
-GET  /documents/        — list all ingested source files
-POST /query/            — run the full RAG pipeline
-GET  /health            — liveness check
+POST /documents/upload       — validate + ingest (202, background)
+GET  /documents/             — list all ingested source files
+GET  /documents/status       — per-file ingestion status
+DELETE /documents/{filename} — remove one document
+DELETE /documents/           — remove all documents
+POST /query/                 — full RAG pipeline
+GET  /health                 — liveness check (auth-exempt)
 ```
 
 ### Upload endpoint (`documents.py`)
 
-File type validation happens at the boundary before any pipeline work. The
-uploaded file is written to a temp file (loaders need a path, not a byte
-stream), then the full ingestion pipeline runs: load → chunk → embed → store.
-Re-uploading the same filename deletes existing chunks first — replace, never
-duplicate. Temp file is always cleaned up in a `finally` block.
+Security checks run in cheapest-first order before any pipeline work:
 
-**Supported types:** `.pdf`, `.docx`, `.txt`. CSV and XLSX were considered
-and deliberately excluded — structured tabular data embeds poorly as raw text
-because rows like `"Q3,4200000,12%"` have no natural language context for the
-embedding model to work with.
+1. Extension check — reject unsupported types before reading bytes
+2. Read bytes into memory
+3. Size check — reject files over 25 MB with 413
+4. Magic byte validation — inspect actual file header, not just extension
+5. Filename sanitisation — strip directory traversal and unsafe characters
+6. Write to temp file, queue background ingestion, return 202 immediately
+
+**Background ingestion:** `BackgroundTasks` runs the full pipeline after the
+response is sent. The browser gets 202 in ~50ms; ingestion completes in the
+background. Why `BackgroundTasks` not a task queue: simpler, no extra
+dependencies, appropriate for a workload that won't see concurrent heavy
+ingestion. A production system with many simultaneous users would use Celery or RQ.
+
+**Re-upload behavior:** delete existing chunks first, then re-ingest.
+Replace, never silently duplicate.
+
+**Supported types:** `.pdf`, `.docx`, `.txt`. CSV and XLSX deliberately
+excluded — tabular rows embed poorly as unstructured text.
 
 ### Query endpoint (`query.py`)
 
@@ -243,26 +257,49 @@ Pipeline order is deliberate:
 3. `assess_confidence()` — judge retrieval quality **before** generation
 4. `generate()` — synthesize answer
 
-Confidence is assessed before generation so the signal survives even if
-`generate()` raises `GenerationError`. This was verified in practice: a
-Gemini 429 quota error returned a useful confidence signal (`medium, 0.55`)
-alongside the generation failure, rather than losing both.
+Confidence before generation means the signal survives even if `generate()`
+raises `GenerationError`. Verified in practice: a Gemini 429 quota error
+returned a useful confidence signal alongside the generation failure.
 
-### CORS
+### Security layer (`main.py`)
 
-Configured at startup to allow `*` origins — required for the React frontend
-running on a different port during development. Replace with the actual
-frontend domain in production.
+**API key authentication (middleware):** every request must carry `X-API-Key`
+matching `DOCMIND_API_KEY` from `.env`. Implemented as middleware rather than
+a `Depends()` — middleware runs unconditionally on every request, so new routes
+are protected automatically without remembering to add a dependency.
+`/health`, `/docs`, `/openapi.json`, `/redoc` are exempt.
+
+**Rate limiting (slowapi):** `SlowAPIMiddleware` registered at app level.
+Per-endpoint limits via `@limiter.limit()` decorators:
+- Upload: 10/minute — prevents disk-fill loops
+- Query: 20/minute — protects Gemini free-tier quota
+
+**Startup model warm:** `lifespan` hook calls `get_model()` before accepting
+requests. Moves the 2–5 second model-load cost from the first upload to server
+startup where it belongs.
 
 ### Error handling contract
 
 | Condition | HTTP status | Notes |
 |---|---|---|
-| Unsupported file type | 415 | Rejected before pipeline runs |
-| File parses but has no text | 422 | After load, before chunk |
-| Generation failed | 500 with confidence | Confidence returned even on failure |
+| Wrong/missing API key | 401 | Before any router logic |
+| Rate limit exceeded | 429 | Automatic via slowapi |
+| Unsupported file type (extension) | 415 | Before reading bytes |
+| File too large | 413 | After read, before pipeline |
+| Magic byte mismatch | 415 | After read, before pipeline |
+| File has no extractable text | 422 | After load, before chunk |
+| Generation failed | 500 + confidence | Confidence returned even on failure |
 | Retrieval failed | 500 | |
-| No chunks found | 200 with empty answer | Not an error — valid state |
+| No chunks found | 200 with empty answer | Valid state, not an error |
+
+### Ingestion status visibility (`GET /documents/status`)
+
+`_ingestion_status` is an in-memory dict tracking per-file state:
+`"indexing" → "indexed" | "failed"`. Updated at every exit point in
+`_run_ingestion`. Exposed via `GET /documents/status` so the frontend
+can surface failures as a red "Failed" badge instead of leaving the
+user waiting indefinitely for a file that silently failed.
+Resets on server restart — acceptable for a portfolio project.
 
 ---
 
@@ -273,9 +310,7 @@ frontend domain in production.
 ### What it does
 
 A single-page React workspace with two panels: document management on the left,
-an interactive chat assistant on the right. Built on a Lovable-generated base
-(`hero-hues-shine`) using TanStack Router, then extended with all DocMind-specific
-functionality.
+an interactive chat assistant on the right.
 
 ### Stack
 
@@ -286,51 +321,51 @@ functionality.
 
 ### Left panel — Document Center
 
-- Drag-and-drop upload zone backed by an `<input type="file">` (not a bare `div`)
-  so the label remains fully accessible and clickable
-- Upload progress bar via `XMLHttpRequest` `onprogress` — `fetch` doesn't expose
-  upload progress
-- Per-document indexed/indexing status badge
+- Drag-and-drop upload zone backed by `<input type="file">` — accessible and clickable
+- Upload progress bar via `XMLHttpRequest` `onprogress` — `fetch` doesn't expose upload progress
+- Per-document status badge: `Indexed` (emerald) / `Indexing…` (amber) / `Failed` (rose)
+- Status polling: `GET /documents/status` polled every 3 seconds while any doc is
+  `"indexing"` — stops polling once all docs settle, zero unnecessary requests
 - Per-document delete with spinner during in-flight request
 - Clear all with confirmation step before the destructive action
-- Documents load from `GET /documents/` on mount and stay in sync with uploads/deletes
+- `docmind:highlight` custom event listener — highlights the matching document card
+  when citations are opened in the chat panel
 
 ### Right panel — Interactive Assistant
 
 - Chat history with user and assistant bubbles, Framer Motion entry animations
 - Typing indicator with staggered dot animation while awaiting response
-- **Confidence badge** — `high / medium / low` with color coding (emerald/amber/rose),
-  animated in with a spring scale effect
+- **Confidence badge** — `high / medium / low` with emerald/amber/rose color coding,
+  spring-animated on entry
 - **Citations panel** — collapsible per-message, each citation shows filename and page
-  number. Opening citations dispatches a `docmind:highlight` custom event — the left
-  panel listens and highlights the relevant document card, scrolling it into view
+  number. Opening dispatches `docmind:highlight` to the left panel
 - Quick-prompt chips for common queries
-- `Enter` to send, `Shift+Enter` pass-through for future multiline support
+- `Enter` to send
 
 ### API integration decisions
 
-**`crypto.randomUUID()` replaced with `genId()`** — `crypto.randomUUID()` requires
-HTTPS (or localhost). The app runs on plain `http://` in development, which would
-throw silently or crash in some browsers. A `Math.random() + Date.now()` fallback
-is collision-resistant enough for UI keys.
+**Auth headers on every call:** `X-API-Key` added to all 7 backend call sites.
+`AUTH_HEADERS` constant defined once, spread into `fetch()` options. XHR upload
+uses `xhr.setRequestHeader()` separately — `Content-Type` is deliberately NOT
+set on FormData XHR so the browser sets it with the correct multipart boundary.
 
-**Response parsing** — the query response shape from FastAPI is
-`{answer, citations, confidence: {level, reason}, route}`. The frontend maps
-`confidence.level` → `"high" | "medium" | "low"` and normalizes the citation
-fields (`source_file` → `source`, `page_number` → `page`) for display.
+**`crypto.randomUUID()` replaced with `genId()`** — requires HTTPS; fails on
+plain `http://` in some browsers during local development.
 
-**Backend status polling** — `GET /documents/` is polled every 15 seconds and used
-as a liveness check. The header shows an animated green/amber/red pill.
+**Backend status polling** — `GET /documents/` polled every 15 seconds as a
+liveness check. Header shows animated green/amber/red pill.
+
+**Ingestion failure polling** — `GET /documents/status` polled every 3 seconds
+only while at least one document is in `"indexing"` state. Stops automatically.
 
 ### Visual design decisions
 
-- **Dark glass aesthetic** — near-transparent panels (`bg-white/[0.015]`) over a
-  looping video background. No `backdrop-blur` on any component — removed to keep
-  the background fully visible.
-- **Violet accent** — send button, drag-over glow, citation number badges, highlighted
-  document cards all use `violet-400/500` for visual consistency.
-- **Zero decoration on the functional chrome** — the header, status pill, and panel
-  borders are intentionally quiet so the video and chat content dominate.
+- **No `backdrop-blur`** on any component — removed so the video background
+  stays fully visible. Glass effect achieved through low-opacity fills alone.
+- **Violet accent** throughout — send button, drag-over glow, citation badges,
+  highlighted document cards.
+- **Citation ↔ document panel decoupling** via custom DOM events — no prop
+  drilling or shared state between panels.
 
 ---
 
@@ -339,7 +374,8 @@ as a liveness check. The header shows an animated green/amber/red pill.
 **Status:** Not started
 
 *To be filled in: Dockerization, deployment target, production considerations
-(ChromaDB persistence on the target platform, secrets management, OCR binary paths).*
+(ChromaDB persistence on target platform, secrets management, OCR binary
+paths for Linux, CORS tightened to actual frontend domain).*
 
 ---
 
@@ -352,12 +388,13 @@ as a liveness check. The header shows an animated green/amber/red pill.
 | Chunk sizing unit | Tokens, not characters | Maps directly to what the embedding model processes |
 | tiktoken failure | Fallback to `len//4` | Avoids crashing in network-restricted environments |
 | Embedding model | `all-MiniLM-L6-v2` local | Free, no API key, isolated — swap to hosted later without touching upstream |
+| Model loading | Eager at startup via lifespan | First upload was paying 2–5s load cost; moved to startup where it belongs |
 | Vector store | ChromaDB persistent | Data survives app restarts |
 | ChromaDB client cache | Dict keyed by path | Single global client silently returns wrong data for different paths |
 | ChromaDB record IDs | `source_file::chunk_id` | `chunk_id` alone is not unique across multiple documents |
 | ChromaDB distance metric | Cosine (explicit) | Default is squared L2; `1 - distance` only works for cosine |
 | DOCX locator | Paragraph index | True page numbers unavailable in DOCX |
-| OCR fallback | Per-page, Tesseract | Scanned PDFs common in enterprise; per-page avoids loading all images at once |
+| OCR fallback | Per-page, Tesseract | Scanned PDFs common; per-page avoids loading all images at once |
 | OCR paths | Hardcoded, not PATH | Windows PATH unreliable across shells and venvs |
 | TXT support | Single page, no loader | Plain text needs no parsing; wrapped in standard page dict shape |
 | Query routing | Gemini structured JSON | Schema-constrained output guarantees valid route values |
@@ -371,9 +408,23 @@ as a liveness check. The header shows an animated green/amber/red pill.
 | Confidence metric | Max similarity | One strong hit means something relevant was found |
 | Confidence ordering | Assessed before generation | Signal survives `GenerationError` — verified in practice with Gemini 429 |
 | Re-upload behavior | Replace, not reject | Delete existing chunks then re-ingest; no silent duplication |
-| CSV/XLSX support | Excluded | Tabular rows embed poorly; needs row-to-sentence serialization before being RAG-ready |
+| CSV/XLSX support | Excluded | Tabular rows embed poorly; needs row-to-sentence serialization first |
+| Background ingestion | BackgroundTasks | Returns 202 immediately; pipeline runs after response is sent |
+| Upload response code | 202 Accepted | Signals async processing; browser unblocks immediately |
+| Ingestion status | In-memory dict + /status endpoint | Surfaces failures as "Failed" badge; frontend polls only while needed |
+| File size limit | 25 MB, checked after read | Content-Length is client-controlled; `len(contents)` is reliable |
+| Magic byte validation | Inline, no library | No `libmagic` system dependency; PDF/DOCX/TXT headers are stable and simple |
+| Filename sanitisation | `Path().name` + regex strip | Strips traversal and shell metacharacters before use as DB key |
+| API key auth | HTTP middleware | Middleware protects all routes automatically; `Depends()` requires per-endpoint decoration |
+| Rate limiting | slowapi, per-endpoint | Per-endpoint lets upload (10/min) and query (20/min) have different budgets |
+| Upload rate limit | 10/minute | Prevents disk-fill loops |
+| Query rate limit | 20/minute | Protects Gemini free-tier quota |
+| Auth exemptions | /health, /docs, /openapi.json | Liveness check and local dev browsing must work without a key |
 | Upload progress | `XMLHttpRequest` | `fetch` API does not expose upload progress events |
+| XHR Content-Type | Not set manually | Browser sets multipart boundary automatically; manual override breaks it |
 | UUID generation | Custom `genId()` | `crypto.randomUUID()` requires HTTPS; fails in plain HTTP dev environments |
-| Confidence badge placement | Per-message, frontend | Each answer carries its own confidence signal, not a global state |
-| Citation highlight | Custom DOM event | Decouples chat panel from document panel without prop drilling or shared state |
-| `backdrop-blur` | Removed from all panels | Keeps video background fully visible; glass effect achieved through opacity alone |
+| Confidence badge | Per-message, frontend | Each answer carries its own confidence signal |
+| Citation highlight | Custom DOM event | Decouples chat panel from document panel without prop drilling |
+| `backdrop-blur` | Removed from all panels | Video background fully visible; glass effect via opacity alone |
+| Status poll frequency | 3s while indexing, stops after | Zero unnecessary requests once all docs settle |
+| CORS | `*` in dev | Tighten to actual frontend domain at deployment |

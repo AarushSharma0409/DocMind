@@ -1,22 +1,24 @@
 # DocMind
 
-**Multi-document RAG with citations, confidence signaling, and intelligent query routing.**
+**Multi-document RAG with citations, confidence signaling, query routing, and a full security layer.**
 
 DocMind lets you upload a set of documents and ask questions across all of them. Every answer tells you exactly which document and page it came from, and tells you honestly when it isn't sure.
 
-> Built as an AI/ML portfolio project — every module was built, tested, and understood from scratch, not assembled from tutorials.
+> Built as an AI/ML portfolio project — every module was built, tested, and understood from scratch.
 
 ---
 
 ## What makes this different
 
-Most RAG demos answer questions and stop there. DocMind is built around three things most student projects skip:
+Most RAG demos answer questions and stop there. DocMind is built around four things most student projects skip:
 
 **Source citations** — every answer traces back to the exact document and page (or paragraph, for DOCX) it came from. Not just the filename — the specific location, so you can verify it yourself.
 
-**Confidence signaling** — if retrieval quality is weak, DocMind says so. You get a `high / medium / low` confidence badge alongside every answer, derived from the actual similarity scores of what was retrieved — not a post-hoc guess.
+**Confidence signaling** — if retrieval quality is weak, DocMind says so. You get a `high / medium / low` confidence badge alongside every answer, derived from actual similarity scores — not a post-hoc guess.
 
-**Query routing** — before touching the vector database, DocMind classifies the query. "Summarize the report" shouldn't trigger a similarity search. "What did the Q3 report say about churn versus recent industry benchmarks?" needs document context *and* reasoning. The router decides.
+**Query routing** — before touching the vector database, DocMind classifies the query. "Summarize the report" shouldn't trigger a similarity search. "What did the Q3 report say about churn versus recent benchmarks?" needs document context and reasoning. The router decides.
+
+**Security layer** — API key authentication, rate limiting, file size limits, magic byte validation, and filename sanitisation — all implemented and reasoned through, not just bolted on.
 
 ---
 
@@ -25,33 +27,35 @@ Most RAG demos answer questions and stop there. DocMind is built around three th
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        React Frontend                           │
-│         Upload zone · Chat UI · Citations · Confidence          │
+│    Upload zone · Chat UI · Citations · Confidence badges        │
+│    X-API-Key header on every backend call                       │
 └────────────────────────────┬────────────────────────────────────┘
                              │ HTTP
 ┌────────────────────────────▼────────────────────────────────────┐
-│                       FastAPI Backend                           │
-│   POST /documents/upload · GET /documents/ · POST /query/       │
-└──────┬──────────────────────────────────────────┬───────────────┘
-       │ Ingest                                   │ Query
-┌──────▼──────────────┐               ┌───────────▼───────────────┐
-│  Ingestion Pipeline │               │      Query Pipeline        │
-│                     │               │                           │
-│  loaders.py         │               │  query_router.py          │
-│  PDF/DOCX/TXT +OCR  │               │  Gemini classifies query  │
-│         ↓           │               │         ↓                 │
-│  chunker.py         │               │  retriever.py             │
-│  500-token chunks   │               │  cosine similarity search │
-│  75-token overlap   │               │         ↓                 │
-│         ↓           │               │  confidence.py            │
-│  embedder.py        │               │  judges retrieval quality │
-│  all-MiniLM-L6-v2  │               │         ↓                 │
-│         ↓           │               │  generator.py             │
-│  vector_store.py    │               │  Gemini synthesizes answer│
-│  ChromaDB on disk   │               │  with citations by index  │
-└─────────────────────┘               └───────────────────────────┘
-                             │
-                    ChromaDB (persistent)
-                    survives app restarts
+│                  FastAPI Backend (main.py)                       │
+│  Auth middleware · Rate limiter · Lifespan model warm           │
+└──────┬──────────────────────────────────────┬───────────────────┘
+       │ Ingest                               │ Query
+┌──────▼──────────────┐           ┌───────────▼───────────────────┐
+│  Ingestion Pipeline │           │        Query Pipeline          │
+│                     │           │                               │
+│  loaders.py         │           │  query_router.py              │
+│  PDF / DOCX / TXT   │           │  Gemini classifies query      │
+│  + OCR fallback     │           │          ↓                    │
+│         ↓           │           │  retriever.py                 │
+│  chunker.py         │           │  cosine similarity search     │
+│  500-token chunks   │           │          ↓                    │
+│  75-token overlap   │           │  confidence.py                │
+│         ↓           │           │  assessed before generation   │
+│  embedder.py        │           │          ↓                    │
+│  all-MiniLM-L6-v2  │           │  generator.py                 │
+│  (local, no API)    │           │  Gemini synthesizes answer    │
+│         ↓           │           │  with citations by index      │
+│  vector_store.py    │           └───────────────────────────────┘
+│  ChromaDB on disk   │
+└─────────────────────┘
+         ↕
+   ChromaDB (persistent — survives restarts)
 ```
 
 ---
@@ -67,7 +71,8 @@ Most RAG demos answer questions and stop there. DocMind is built around three th
 | LLM | Google Gemini (query routing + generation) |
 | OCR | Tesseract + Poppler (scanned PDF fallback) |
 | Document parsing | `pypdf` · `python-docx` |
-| Testing | `pytest` · `unittest.mock` · 167 tests across 7 modules |
+| Rate limiting | `slowapi` |
+| Testing | `pytest` · `unittest.mock` · 167 tests across 8 modules |
 
 ---
 
@@ -78,9 +83,10 @@ DocMind/
 ├── backend/
 │   ├── app/
 │   │   ├── api/
-│   │   │   ├── main.py          # FastAPI app, CORS, startup
-│   │   │   ├── documents.py     # Upload + list endpoints
-│   │   │   └── query.py         # Query endpoint — full RAG pipeline
+│   │   │   ├── main.py          # FastAPI app, auth middleware, rate limiter, lifespan
+│   │   │   └── routers/
+│   │   │       ├── documents.py # Upload, list, status, delete endpoints
+│   │   │       └── query.py     # Query endpoint — full RAG pipeline
 │   │   ├── ingestion/
 │   │   │   ├── loaders.py       # PDF / DOCX / TXT parsing + OCR fallback
 │   │   │   ├── chunker.py       # Token-based splitting with overlap
@@ -93,7 +99,7 @@ DocMind/
 │   │       ├── generator.py     # Gemini answer synthesis + citations
 │   │       └── confidence.py    # Retrieval quality signal
 │   ├── tests/                   # 167 tests across all modules
-│   └── .env                     # GEMINI_API_KEY (not committed)
+│   └── .env                     # GEMINI_API_KEY + DOCMIND_API_KEY (not committed)
 ├── frontend/
 │   └── src/
 │       └── routes/
@@ -111,24 +117,22 @@ DocMind/
 - Python 3.10+
 - Node.js 18+
 - A [Google Gemini API key](https://aistudio.google.com/) (free tier works)
-- For OCR support on scanned PDFs: [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) and [Poppler](https://github.com/oschwartz10612/poppler-windows/releases/)
+- For OCR on scanned PDFs: [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) and [Poppler](https://github.com/oschwartz10612/poppler-windows/releases/)
 
 ### Backend
 
 ```bash
-# Clone the repo
-git clone https://github.com/AarushSharma0409/DocMind.git
 cd DocMind/backend
 
-# Install dependencies
 pip install -r requirements.txt
 
-# Create .env
-echo "GEMINI_API_KEY=your_key_here" > .env
+# Create .env — both keys required
+echo "GEMINI_API_KEY=your_gemini_key" > .env
+echo "DOCMIND_API_KEY=$(python -c 'import secrets; print(secrets.token_hex(32))')" >> .env
 
-# Start the server
 uvicorn app.api.main:app --reload
-# → running at http://127.0.0.1:8000
+# → http://127.0.0.1:8000
+# You'll see "Model ready" before the server accepts requests
 ```
 
 ### Frontend
@@ -137,8 +141,12 @@ uvicorn app.api.main:app --reload
 cd DocMind/frontend
 
 npm install
+
+# Create .env.local — must match DOCMIND_API_KEY in backend/.env
+echo "VITE_DOCMIND_API_KEY=your_same_api_key" > .env.local
+
 npm run dev
-# → running at http://localhost:5173
+# → http://localhost:5173
 ```
 
 ### Run tests
@@ -146,10 +154,10 @@ npm run dev
 ```bash
 cd backend
 
-# All unit tests (no API calls, fast)
+# All unit tests (no API calls)
 python -m pytest tests/ -v -m "not integration"
 
-# With real Gemini API (integration tests)
+# Including real Gemini API tests
 python -m pytest tests/ -v
 ```
 
@@ -157,36 +165,39 @@ python -m pytest tests/ -v
 
 ## API reference
 
-### `POST /documents/upload`
+All endpoints (except `/health`) require the header:
+```
+X-API-Key: your_api_key
+```
 
-Upload a document for ingestion.
+### `POST /documents/upload`
 
 ```
 Content-Type: multipart/form-data
-Body: file (PDF, DOCX, or TXT — up to 25MB)
+Body: file (PDF, DOCX, TXT — max 25 MB)
 ```
 
+Returns `202 Accepted` immediately. Ingestion runs in the background.
+
 ```json
-{
-  "message": "report.pdf ingested successfully",
-  "chunks_stored": 42,
-  "source_file": "report.pdf"
-}
+{ "message": "File accepted. Ingestion running in background.", "filename": "report.pdf", "status": "indexing" }
 ```
 
 ### `GET /documents/`
 
-List all currently indexed documents.
+```json
+{ "documents": ["report.pdf", "notes.docx"], "count": 2 }
+```
+
+### `GET /documents/status`
+
+Per-file ingestion status. Poll this to detect failures.
 
 ```json
-{
-  "documents": ["report.pdf", "notes.docx", "transcript.txt"]
-}
+{ "status": { "report.pdf": "indexed", "notes.docx": "failed" } }
 ```
 
 ### `POST /query/`
-
-Ask a question across all indexed documents.
 
 ```json
 { "query": "What were the key findings in the Q3 report?" }
@@ -196,20 +207,37 @@ Ask a question across all indexed documents.
 {
   "answer": "The Q3 report identified three key findings...",
   "citations": [
-    {
-      "source_file": "q3_report.pdf",
-      "page_number": 7,
-      "locator_type": "page",
-      "excerpt": "Revenue grew 12% year-over-year..."
-    }
+    { "source_file": "q3_report.pdf", "page_number": 7, "locator_type": "page", "excerpt": "..." }
   ],
-  "confidence": {
-    "level": "high",
-    "reason": "Strong similarity scores across multiple retrieved chunks."
-  },
+  "confidence": { "level": "high", "reason": "Strong similarity across multiple chunks." },
   "route": "retrieve"
 }
 ```
+
+### Error responses
+
+| Status | Meaning |
+|---|---|
+| 401 | Missing or wrong `X-API-Key` |
+| 413 | File over 25 MB |
+| 415 | Unsupported type or magic byte mismatch |
+| 422 | Empty query or no extractable text |
+| 429 | Rate limit hit (10/min upload, 20/min query) |
+| 500 | Pipeline failure (confidence still returned on generation failure) |
+
+---
+
+## Security
+
+| Layer | Implementation |
+|---|---|
+| Authentication | `X-API-Key` middleware — all endpoints, automatic on new routes |
+| Rate limiting | `slowapi` — 10/min upload, 20/min query, per IP |
+| File size | 25 MB limit checked after read (`Content-Length` is client-controlled) |
+| Magic bytes | PDF (`%PDF`), DOCX (`PK\x03\x04`), TXT (UTF-8 decodable) — checked before pipeline |
+| Filename | `Path().name` strips traversal, regex strips shell metacharacters |
+| Secrets | `.env` and `chroma_store/` in `.gitignore` — never committed |
+| CORS | `*` in development — tighten to frontend domain at deployment |
 
 ---
 
@@ -226,23 +254,25 @@ Ask a question across all indexed documents.
 | `generator.py` | 27 + 4 integration | Citation by index, hallucination defense, error handling |
 | `confidence.py` | 32 | Thresholds, single-chunk rule, max-not-average, empty input |
 
-**167 unit tests total.** Every module was built with tests before the next module started.
+**167 unit tests total.**
 
 ---
 
 ## Key engineering decisions
 
-A few decisions that are worth calling out explicitly, because they're the ones an interviewer would ask about:
+**ChromaDB distance metric** — ChromaDB's default is squared L2, not cosine. `1 - distance` is only valid for cosine. Produced all-zero similarity scores until setting `{"hnsw:space": "cosine"}` explicitly. Caught by tests asserting exact similarity values, not just result ordering.
 
-**ChromaDB distance metric** — ChromaDB's default distance metric is squared L2, not cosine. `1 - distance` is only valid for cosine. This produced all-zero similarity scores until explicitly setting `{"hnsw:space": "cosine"}` on collection creation. Caught by writing tests that asserted exact similarity values, not just result ordering.
+**Confidence before generation** — the query pipeline assesses confidence before calling `generate()`. If generation fails (e.g. Gemini 429), the API still returns a meaningful confidence signal. Verified in practice.
 
-**Confidence before generation** — the query pipeline assesses confidence *before* calling `generate()`. This means if generation fails (e.g. a Gemini 429 rate-limit), the API still returns a useful confidence signal. Verified in practice — a real Gemini quota error returned `confidence: medium, score: 0.55` alongside the generation failure.
+**Magic bytes over extension** — extension checking is bypassed by renaming files. Magic bytes inspect the actual file header. Implemented without `python-magic` (requires a system binary) — PDF and DOCX signatures are stable and simple enough to check inline.
 
-**OCR as a per-page fallback** — `pypdf` returns empty strings for scanned PDF pages. Rather than failing or requiring a separate OCR-only path, `load_pdf()` detects image-only pages and falls back to Tesseract per page. Text pages take the fast path with zero OCR overhead.
+**Background ingestion** — `BackgroundTasks` returns 202 in ~50ms. The full pipeline (load → chunk → embed → store) runs after the response. Failure state is tracked in `_ingestion_status` and exposed via `GET /documents/status` so the frontend can show a "Failed" badge instead of leaving the user waiting indefinitely.
 
-**Citations by chunk index, not chunk_id** — the LLM is prompted to cite chunks by their position in the prompt (`chunk_index: 2`), not by a `chunk_id` field. This is because `retriever.py` doesn't return a `chunk_id`. Caught by checking the actual output contract of each module before building the next one.
+**Auth as middleware not Depends()** — `Depends()` requires adding the dependency to every endpoint. Middleware runs unconditionally, so new routes are protected automatically without remembering to add anything.
 
-**Two LLM providers → one** — an early draft of `generator.py` used Groq (`llama-3.1-8b-instant`) while `query_router.py` used Gemini. Reversed deliberately before the code shipped: two providers means two SDKs, two auth setups, two failure modes in one pipeline.
+**Two LLM providers → one** — an early draft of `generator.py` used Groq while `query_router.py` used Gemini. Consolidated to Gemini: one provider, one SDK, one auth setup, one failure mode.
+
+**Citations by chunk index** — the LLM cites chunks by position in the prompt, not by `chunk_id`. This is because `retriever.py` doesn't return a `chunk_id`. Caught by checking the actual output contract of each module before building the next.
 
 ---
 
@@ -251,10 +281,10 @@ A few decisions that are worth calling out explicitly, because they're the ones 
 | Format | How it's parsed | Citation locator |
 |---|---|---|
 | PDF (text-based) | `pypdf` | Page number |
-| PDF (scanned) | `pypdf` + Tesseract OCR fallback | Page number |
+| PDF (scanned) | `pypdf` + Tesseract OCR per page | Page number |
 | DOCX | `python-docx` | Paragraph index (true position) |
 | TXT | Direct read | Single page |
-| CSV / XLSX | ❌ Not supported | Tabular rows embed poorly as unstructured text |
+| CSV / XLSX | Not supported | Tabular rows embed poorly as unstructured text |
 
 ---
 

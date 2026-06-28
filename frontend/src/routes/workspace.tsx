@@ -20,6 +20,11 @@ const VIDEO_URL =
 const API_BASE =
   (import.meta.env.VITE_DOCMIND_API_BASE as string | undefined) ??
   "http://127.0.0.1:8000";
+  const API_KEY = (import.meta.env.VITE_DOCMIND_API_KEY as string | undefined) ?? "";
+
+const AUTH_HEADERS: Record<string, string> = {
+  "X-API-Key": API_KEY,
+};
 
 function genId() {
   return "id-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -64,7 +69,7 @@ function useVideoFadeLoop() {
   return ref;
 }
 
-type Doc = { id: string; name: string; size: number; status: "indexed" | "indexing" };
+type Doc = { id: string; name: string; size: number; status: "indexed" | "indexing" | "failed" };
 type Citation = { source: string; page?: number | string };
 type Message = {
   id: string;
@@ -196,7 +201,7 @@ function LeftPanel({
   }, [docs]);
 
   useEffect(() => {
-    fetch(`${API_BASE}/documents/`)
+    fetch(`${API_BASE}/documents/`, { headers: AUTH_HEADERS })
       .then((r) => (r.ok ? r.json() : { documents: [] }))
       .then((data) => {
         const names: string[] = Array.isArray(data.documents) ? data.documents : [];
@@ -210,6 +215,32 @@ function LeftPanel({
       })
       .catch(() => {});
   }, []);
+
+  // Poll /documents/status every 3s while any doc is still indexing.
+  // Surfaces backend ingestion failures as a red "Failed" badge instead
+  // of leaving the card stuck on "Indexing…" indefinitely.
+  useEffect(() => {
+    const poll = () => {
+      const hasIndexing = docs.some((d) => d.status === "indexing");
+      if (!hasIndexing) return;
+      fetch(`${API_BASE}/documents/status`, { headers: AUTH_HEADERS })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!data?.status) return;
+          setDocs((prev) =>
+            prev.map((doc) => {
+              const s = data.status[doc.name];
+              if (s === "failed" && doc.status === "indexing") return { ...doc, status: "failed" as const };
+              if (s === "indexed" && doc.status === "indexing") return { ...doc, status: "indexed" as const };
+              return doc;
+            })
+          );
+        })
+        .catch(() => {});
+    };
+    const id = setInterval(poll, 3000);
+    return () => clearInterval(id);
+  }, [docs]);
 
   const uploadFile = useCallback(async (file: File) => {
     const id = genId();
@@ -272,7 +303,7 @@ function LeftPanel({
   }, [docs, setDocs]);
 
   return (
-    <aside className="flex w-[280px] shrink-0 flex-col rounded-2xl border border-white/[0.04] bg-white/[0.015] shadow-[0_8px_32px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.03)]">
+    <aside className="flex w-[280px] shrink-0 flex-col rounded-2xl border border-white/[0.04] bg-white/[0.015] backdrop-blur-sm shadow-[0_8px_32px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.03)]">
       {/* Panel heading */}
       <div className="px-5 pt-5 pb-3">
         <h2 className="text-sm font-semibold text-foreground">Document Center</h2>
@@ -360,9 +391,11 @@ function LeftPanel({
                   "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold",
                   doc.status === "indexed"
                     ? "bg-emerald-400/15 text-emerald-400"
+                    : doc.status === "failed"
+                    ? "bg-rose-400/15 text-rose-400"
                     : "bg-amber-400/15 text-amber-400"
                 )}>
-                  {doc.status === "indexed" ? "Indexed" : "Indexing…"}
+                  {doc.status === "indexed" ? "Indexed" : doc.status === "failed" ? "Failed" : "Indexing…"}
                 </span>
                 {/* Per-doc delete */}
                 <button
@@ -501,7 +534,7 @@ function RightPanel({ docs }: { docs: Doc[] }) {
     : ["Summarize the latest document", "Find key risks", "List action items"];
 
   return (
-    <section className="flex flex-1 flex-col overflow-hidden rounded-2xl border border-white/[0.04] bg-white/[0.01] shadow-[0_8px_32px_rgba(0,0,0,0.1),inset_0_1px_0_rgba(255,255,255,0.02)]">
+    <section className="flex flex-1 flex-col overflow-hidden rounded-2xl border border-white/[0.04] bg-white/[0.01] backdrop-blur-sm shadow-[0_8px_32px_rgba(0,0,0,0.1),inset_0_1px_0_rgba(255,255,255,0.02)]">
       {/* Right panel header — "Interactive Assistant" + question count */}
       <div className="flex items-center justify-between border-b border-white/[0.05] px-5 py-3">
         <div className="flex items-center gap-2">
@@ -550,7 +583,7 @@ function RightPanel({ docs }: { docs: Doc[] }) {
 
       {/* Input bar — dark card style */}
       <div className="px-5 pb-4">
-        <div className="flex items-center gap-3 rounded-xl border border-white/[0.07] bg-white/[0.03] px-4 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+        <div className="flex items-center gap-3 rounded-xl border border-white/[0.07] bg-white/[0.03] px-4 py-2.5 backdrop-blur-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
           <span className="text-foreground/25">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -591,8 +624,8 @@ function MessageBubble({ message }: { message: Message }) {
         className={cn(
           "max-w-[78%] rounded-2xl px-4 py-3 text-sm",
           isUser
-            ? "bg-violet-500/60 text-white shadow-[0_4px_16px_rgba(139,92,246,0.2)]"
-            : "border border-white/[0.06] bg-white/[0.03] text-foreground"
+            ? "bg-violet-500/60 text-white backdrop-blur-sm shadow-[0_4px_16px_rgba(139,92,246,0.2)]"
+            : "border border-white/[0.06] bg-white/[0.03] text-foreground backdrop-blur-sm"
         )}
       >
         <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>
@@ -700,7 +733,7 @@ function Citations({ citations }: { citations: Citation[] }) {
 function TypingIndicator() {
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex justify-start">
-      <div className="rounded-2xl border border-white/[0.06] bg-white/[0.03] px-4 py-3">
+      <div className="rounded-2xl border border-white/[0.06] bg-white/[0.03] px-4 py-3 backdrop-blur-sm">
         <div className="flex gap-1.5">
           {[0, 1, 2].map((i) => (
             <motion.span
