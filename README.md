@@ -1,7 +1,7 @@
 ---
 title: DocMind
 emoji: 🧠
-colorFrom: violet
+colorFrom: purple
 colorTo: indigo
 sdk: docker
 pinned: false
