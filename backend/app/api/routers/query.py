@@ -25,7 +25,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.api.main import limiter
+from app.api.limiter import limiter
 
 from app.retrieval.query_router import route_query
 from app.retrieval.retriever import (

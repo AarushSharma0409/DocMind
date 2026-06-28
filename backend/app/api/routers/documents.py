@@ -60,7 +60,7 @@ from app.storage.vector_store import (
     get_collection,
     DEFAULT_COLLECTION_NAME,
 )
-from app.api.main import limiter
+from app.api.limiter import limiter
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 

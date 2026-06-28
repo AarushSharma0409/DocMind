@@ -1,51 +1,54 @@
 """
-main.py — Phase 3, API entry point
+main.py — FastAPI entry point
 
-Creates the FastAPI app instance and wires everything together.
-Routers for each endpoint group live in separate files and are
-registered here — this file stays thin, it's just the assembly point.
+Wires the app together: auth middleware, rate limiting, CORS, routers,
+lifespan model warm, and optional static file serving on HF Spaces.
 
-STARTUP OPTIMIZATION: the embedding model (all-MiniLM-L6-v2) is
-eager-loaded here via FastAPI's lifespan hook, rather than lazily on
-the first upload request. Without this, the first upload after starting
-the server pays a 2–5 second model-load tax on top of ingestion time,
-making it feel broken. With eager loading, uvicorn prints "Model ready"
-before accepting requests, and every subsequent upload skips that cost
-entirely.
+CIRCULAR IMPORT NOTE:
+The rate limiter is defined in limiter.py, not here. This is deliberate —
+routers need to import the limiter, and if it were defined in main.py,
+importing it from routers would create a circular dependency
+(main → routers → main). limiter.py has no such dependencies.
 """
 
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
+from app.api.limiter import limiter
 from app.api.routers import documents, query
 from app.ingestion.embedder import get_model
+
+# Load .env relative to this file — working-directory-independent
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent.parent / ".env")
+
+# ── API key auth ──────────────────────────────────────────────────────────────
+DOCMIND_API_KEY = os.environ.get("DOCMIND_API_KEY", "").strip()
+_AUTH_EXEMPT = {"/health", "/docs", "/openapi.json", "/redoc"}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Runs once at startup (before any requests), and once at shutdown.
+    if not DOCMIND_API_KEY:
+        print("WARNING: DOCMIND_API_KEY is not set — endpoints are unprotected")
+    else:
+        print(f"API key auth enabled (key length: {len(DOCMIND_API_KEY)} chars)")
 
-    We use it to warm the embedding model — loading all-MiniLM-L6-v2
-    takes 2–5 seconds on first call (reading weights from disk into
-    memory). Doing it here means:
-      - uvicorn is 'ready' only after the model is loaded
-      - the first upload request doesn't pay this cost
-      - every upload from that point on uses the already-loaded singleton
-
-    This is the correct pattern for any expensive resource (model, DB
-    connection pool, etc.) that needs to be ready before the first
-    request hits.
-    """
-    print("⏳ Loading embedding model...")
-    get_model()  # warms the singleton in embedder.py
-    print("✅ Model ready — accepting requests")
+    print("Loading embedding model...")
+    get_model()
+    print("Model ready — accepting requests")
     yield
-    # anything after yield runs on shutdown (nothing to clean up here)
 
 
+# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="DocMind API",
     description="Multi-document RAG system with citations and confidence signaling.",
@@ -53,9 +56,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allows the React frontend (running on a different port during
-# development) to make requests to this backend.
-# In production, replace ["*"] with your actual frontend domain.
+# Rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -64,23 +70,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routers — each file handles one concern
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    if request.url.path in _AUTH_EXEMPT:
+        return await call_next(request)
+    if not DOCMIND_API_KEY:
+        return await call_next(request)
+    provided_key = request.headers.get("X-API-Key", "").strip()
+    if provided_key != DOCMIND_API_KEY:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid or missing API key. Set X-API-Key header."},
+        )
+    return await call_next(request)
+
+
+# Routers
 app.include_router(documents.router)
 app.include_router(query.router)
 
-# On Hugging Face Spaces, serve the built React frontend as static files
-# so the whole app is a single deployment unit. In local dev the React
-# dev server runs separately on port 5173, so this is skipped.
+# On HF Spaces, serve the built React frontend as static files
 if os.environ.get("HF_SPACE", "").lower() == "true":
-    from pathlib import Path as _Path
     from fastapi.staticfiles import StaticFiles
-    _static = _Path(__file__).parent.parent.parent / "static"
+    _static = Path(__file__).parent.parent.parent / "static"
     if _static.exists():
-        # Mount at root AFTER API routes so /documents/ and /query/ still work
         app.mount("/", StaticFiles(directory=str(_static), html=True), name="static")
 
 
 @app.get("/health")
 def health_check():
-    """Quick liveness check — confirms the API is running."""
+    """Liveness check — no auth required."""
     return {"status": "ok"}
