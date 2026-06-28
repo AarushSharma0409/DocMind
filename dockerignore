@@ -1,0 +1,36 @@
+# .dockerignore — keeps the build context lean
+# Without this, Docker sends the entire repo to the daemon including
+# node_modules, chroma_store, and other large/irrelevant directories.
+
+# Frontend — not needed in the backend image
+frontend/
+node_modules/
+
+# ChromaDB data — never bake local data into the image
+chroma_store/
+**/chroma_store/
+data/
+
+# Python artifacts
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Secrets — should never be in the image
+.env
+**/.env
+*.env.local
+
+# Dev tools
+.git/
+.github/
+.vscode/
+*.md
+docs/
+
+# Test files — not needed at runtime
+backend/tests/

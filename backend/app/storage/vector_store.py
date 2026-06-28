@@ -39,8 +39,18 @@ compatibility, this module explicitly converts None to the string
 or causes a storage error at write time.
 """
 
+import os
+
 import chromadb
 from chromadb.config import Settings
+
+# HF_SPACE=true means we're running on Hugging Face Spaces, which has no
+# persistent disk on the free tier. In that case we use an in-memory client
+# so the app works correctly — data is lost on restart, but the architecture,
+# code, and all other behaviour are identical to the persistent version.
+# The persistent client remains the default for local development and any
+# platform that provides a disk volume.
+_USE_MEMORY = os.environ.get("HF_SPACE", "").lower() == "true"
 
 DEFAULT_PERSIST_DIR = "./data/chroma"
 DEFAULT_COLLECTION_NAME = "docmind_chunks"
@@ -60,16 +70,31 @@ DEFAULT_COLLECTION_NAME = "docmind_chunks"
 _clients: dict[str, "chromadb.ClientAPI"] = {}
 
 
+# Singleton in-memory client — only used when HF_SPACE=true.
+# One shared instance is correct here: unlike the persistent client (where
+# different persist_dirs should return different clients), there's only ever
+# one in-memory store and it should be shared across all callers.
+_memory_client: "chromadb.ClientAPI | None" = None
+
+
 def get_client(persist_dir: str = DEFAULT_PERSIST_DIR):
     """
-    Return a persistent ChromaDB client for the given persist_dir,
-    creating it on first call for that path and reusing it after that.
+    Return a ChromaDB client, either persistent or in-memory depending
+    on the HF_SPACE environment variable.
 
-    Caching is keyed by persist_dir specifically - calling this with two
-    different paths correctly returns two different clients, rather than
-    silently reusing whichever client happened to be created first (see
-    the module-level comment on _clients for why this matters).
+    Persistent (default): keyed by persist_dir so different paths get
+    different clients. Data survives restarts.
+
+    In-memory (HF_SPACE=true): single shared instance, data lost on
+    restart. Used on Hugging Face Spaces free tier which has no disk.
     """
+    global _memory_client
+
+    if _USE_MEMORY:
+        if _memory_client is None:
+            _memory_client = chromadb.Client()
+        return _memory_client
+
     if persist_dir not in _clients:
         _clients[persist_dir] = chromadb.PersistentClient(
             path=persist_dir,

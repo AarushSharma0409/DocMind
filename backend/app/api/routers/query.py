@@ -19,6 +19,7 @@ even when generation failed — it explains why. Assessing confidence
 first means that signal is never lost to a downstream failure.
 """
 
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -40,7 +41,12 @@ from app.storage.vector_store import get_collection
 router = APIRouter(prefix="/query", tags=["query"])
 
 # Must match documents.py — same store, same collection.
-PERSIST_DIR = str(Path(__file__).resolve().parent.parent.parent.parent / "chroma_store")
+# PERSIST_DIR: use CHROMA_PERSIST_DIR env var if set (Railway volume mount),
+# otherwise fall back to chroma_store/ relative to the repo root (local dev).
+PERSIST_DIR = os.environ.get(
+    "CHROMA_PERSIST_DIR",
+    str(Path(__file__).resolve().parent.parent.parent.parent / "chroma_store"),
+)
 COLLECTION_NAME = DEFAULT_COLLECTION_NAME
 
 

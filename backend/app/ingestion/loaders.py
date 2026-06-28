@@ -1,5 +1,5 @@
 """
-loaders.py - Phase 1, Chunk 1 (updated with OCR fallback)
+loaders.py - Phase 1, Chunk 1 (updated with OCR fallback + cross-platform paths)
 
 WHY THIS EXISTS:
 Before we can chunk or embed anything, we need to extract raw text from
@@ -26,33 +26,45 @@ back to OCR via Tesseract (pytesseract + pdf2image) on a per-page basis:
 This means one PDF can mix text-based and image-based pages and both
 will be handled correctly.
 
-WHY HARDCODE THE TESSERACT PATH ON WINDOWS:
-pytesseract.pytesseract.tesseract_cmd lets us point directly at the
-executable rather than relying on it being on PATH. On Windows, PATH
-changes often don't propagate reliably across shells, making the
-hardcoded path the more robust choice for a dev environment.
+CROSS-PLATFORM PATH HANDLING (added Phase 5):
+Tesseract and Poppler were previously hardcoded to Windows paths
+(C:\\Program Files\\...). In the Docker container (Ubuntu), these
+binaries are installed via apt-get and available on PATH — no explicit
+path needed. On Windows (local dev), we still point directly at the
+executables since PATH propagation is unreliable there.
+
+The detection is os.name == 'nt' (Windows) vs anything else (Linux/Mac).
+On non-Windows: pass no path to pytesseract (uses PATH), and omit
+poppler_path from convert_from_path (also uses PATH).
+On Windows: use the hardcoded install locations.
 """
 
 import os
+import sys
 from pathlib import Path
 
 from pypdf import PdfReader
 from docx import Document
 
 # --- OCR setup ---
-# Tesseract must be installed at the system level. On Windows it's not
-# always on PATH even after installation, so we point directly at the
-# executable. If the path is wrong or Tesseract isn't installed, OCR
-# will raise a clear TesseractNotFoundError rather than silently
-# returning empty text.
+# On Linux (Docker): Tesseract and Poppler are on PATH via apt-get.
+# On Windows (dev):  PATH is unreliable, so we point at the executables directly.
+#
+# IS_WINDOWS controls which path strategy is used throughout this file.
+IS_WINDOWS = os.name == "nt"
+
+# Windows install paths — adjust if you installed to a non-default location
+_TESSERACT_WIN = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+_POPPLER_WIN   = r"C:\Program Files\poppler-26.02.0\Library\bin"
+
 try:
     import pytesseract
     from pdf2image import convert_from_path
 
-    # Windows default install location — adjust if you installed elsewhere
-    TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if os.path.exists(TESSERACT_PATH):
-        pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+    if IS_WINDOWS and os.path.exists(_TESSERACT_WIN):
+        # Point directly at the executable — avoids PATH propagation issues
+        pytesseract.pytesseract.tesseract_cmd = _TESSERACT_WIN
+    # On Linux: pytesseract finds tesseract on PATH automatically, no config needed
 
     OCR_AVAILABLE = True
 except ImportError:
@@ -75,22 +87,24 @@ def _ocr_pdf_page(file_path: str, page_number: int) -> str:
     large documents. Per-page conversion means we only pay the cost for
     pages that actually need OCR — most documents are either fully
     text-based (no OCR needed at all) or have just a few image pages.
+
+    POPPLER PATH:
+    On Windows: passed explicitly as _POPPLER_WIN (PATH unreliable).
+    On Linux:   omitted entirely — pdf2image finds pdftoppm on PATH.
     """
     if not OCR_AVAILABLE:
         return ""
 
     try:
-        # Convert only the specific page to an image (first_page and
-        # last_page are 1-indexed, matching our page_number convention)
-        images = convert_from_path(
-            file_path,
+        convert_kwargs = dict(
             first_page=page_number,
             last_page=page_number,
-            dpi=300,  # 300 DPI is the standard for readable OCR output;
-                      # lower DPI degrades accuracy, higher adds cost with
-                      # diminishing returns
-            poppler_path=r"C:\Program Files\poppler-26.02.0\Library\bin",
+            dpi=300,  # 300 DPI is the standard for readable OCR output
         )
+        if IS_WINDOWS:
+            convert_kwargs["poppler_path"] = _POPPLER_WIN
+
+        images = convert_from_path(file_path, **convert_kwargs)
         if not images:
             return ""
 
@@ -143,8 +157,7 @@ def load_pdf(file_path: str) -> list[dict]:
                     "locator_type": "page",
                     "text": ocr_text,
                 })
-            # If OCR also returns nothing, skip the page entirely —
-            # same behavior as the original loader for empty pages
+            # If OCR also returns nothing, skip the page entirely
 
     return pages
 
@@ -163,24 +176,10 @@ def load_docx(file_path: str) -> list[dict]:
     Returns a list of dicts like:
         [{"page_number": 5, "locator_type": "paragraph_index", "text": "..."}, ...]
 
-    The "page_number" field holds the 1-indexed paragraph position -
-    specifically, the paragraph's TRUE position among all paragraphs in
-    the document (same indexing principle as load_pdf's page_number),
-    not a count of only the non-empty ones. This matters for citation
-    traceability: if blank paragraphs were silently excluded from the
-    count, "page_number: 4" might not correspond to the actual 4th
-    paragraph in the file, and anyone verifying a citation by opening the
-    document and counting paragraphs would land on the wrong spot - a
-    silent, hard-to-detect error rather than an obvious one.
-
-    "locator_type" tells downstream consumers this is a structural proxy,
-    not a true rendered page - so the citation UI can render "para. 12"
-    instead of "Page 12".
-
-    Empty paragraphs (whitespace-only, blank lines between sections) are
-    skipped from the *output*, same rationale as load_pdf skipping pages
-    with no text - but NOT skipped from the index count, since that
-    would break true-position traceability.
+    The "page_number" field holds the 1-indexed paragraph TRUE position —
+    not a count of only non-empty ones. Blank paragraphs are skipped from
+    the output but not from the index count, so citation traceability is
+    preserved.
     """
     path = Path(file_path)
     if not path.exists():
@@ -202,11 +201,6 @@ def load_docx(file_path: str) -> list[dict]:
 
 
 if __name__ == "__main__":
-    # Quick manual test - run this file directly with a sample file to sanity check.
-    # Usage: python -m app.ingestion.loaders path/to/test.pdf
-    #        python -m app.ingestion.loaders path/to/test.docx
-    import sys
-
     if len(sys.argv) < 2:
         print("Usage: python -m app.ingestion.loaders <path_to_file>")
         sys.exit(1)
