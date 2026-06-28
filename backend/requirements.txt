@@ -1,29 +1,31 @@
-# --- Web framework (Phase 3) ---
+# --- Web framework ---
 fastapi
 uvicorn[standard]
+python-multipart
 
-# --- Document parsing (Phase 1) ---
+# --- Rate limiting ---
+slowapi
+
+# --- Document parsing ---
 pypdf
 python-docx
+pdf2image
+pytesseract
 
-# --- Vector store (Phase 1) ---
+# --- Vector store ---
 chromadb
 
-# --- Embeddings (Phase 1) ---
+# --- Embeddings ---
 sentence-transformers
 tiktoken
 
-# --- LLM client (Gemini, used for query routing and generation) ---
+# --- LLM client (Gemini) ---
 google-genai
-
-# --- Optional fallback LLM client (see generator_groq_backup.py) ---
-# Uncomment if activating the Groq-based generator backup:
-# groq
 
 # --- Utilities ---
 python-dotenv
 pydantic
 
-# --- Testing (not needed for the app itself, only to run tests/) ---
+# --- Testing ---
 pytest
 reportlab
