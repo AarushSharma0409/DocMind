@@ -110,19 +110,28 @@ app.include_router(query.router)
 # static folder sits alongside the app/ package inside /home/appuser/backend.
 if os.environ.get("HF_SPACE", "").lower() == "true":
     from fastapi.staticfiles import StaticFiles
-    # Try multiple candidate paths to be resilient to working directory changes
-    _candidates = [
-        Path(__file__).parent.parent.parent / "static",  # backend/static from api/main.py
-        Path("/home/appuser/backend/static"),             # absolute path in container
-        Path("static"),                                   # relative to cwd
-    ]
-    _static = next((p for p in _candidates if p.exists()), None)
-    if _static:
-        print(f"Serving frontend from {_static}")
-        app.mount("/", StaticFiles(directory=str(_static), html=True), name="static")
+    from fastapi.responses import FileResponse
+
+    _static = Path("/home/appuser/backend/static")
+    print(f"Serving frontend from {_static} (exists={_static.exists()})")
+
+    if _static.exists():
+        # Mount static assets (JS, CSS, images) under /assets
+        # This must come BEFORE the catch-all route
+        _assets = _static / "assets"
+        if _assets.exists():
+            app.mount("/assets", StaticFiles(directory=str(_assets)), name="assets")
+
+        # Catch-all: serve index.html for every unmatched route so
+        # TanStack Router can handle client-side navigation
+        @app.get("/{full_path:path}")
+        async def serve_spa(full_path: str):
+            index = _static / "index.html"
+            if index.exists():
+                return FileResponse(str(index))
+            return JSONResponse(status_code=404, content={"detail": "Frontend not found"})
     else:
-        print("WARNING: static folder not found, frontend will not be served")
-        print("Searched:", [str(p) for p in _candidates])
+        print("WARNING: static folder not found — frontend will not be served")
 
 
 @app.get("/health")
