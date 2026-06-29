@@ -31,7 +31,8 @@ COPY --chown=appuser backend/ .
 # __file__ = /home/appuser/backend/app/api/main.py
 # .parent.parent.parent = /home/appuser/backend
 # so static must be at /home/appuser/backend/static
-RUN cp -r /home/appuser/frontend/dist /home/appuser/backend/static
+# Copy dist CONTENTS into static/, not the dist folder itself
+RUN mkdir -p /home/appuser/backend/static && cp -r /home/appuser/frontend/dist/. /home/appuser/backend/static/
 
 ENV PATH="/home/appuser/.local/bin:${PATH}"
 ENV HF_SPACE=true

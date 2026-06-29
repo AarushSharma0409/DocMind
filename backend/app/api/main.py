@@ -32,7 +32,22 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent.parent / ".env")
 
 # ── API key auth ──────────────────────────────────────────────────────────────
 DOCMIND_API_KEY = os.environ.get("DOCMIND_API_KEY", "").strip()
+# Static frontend routes and API docs are exempt from auth.
+# All /api/ routes still require X-API-Key.
 _AUTH_EXEMPT = {"/health", "/docs", "/openapi.json", "/redoc"}
+
+def _is_exempt(path: str) -> bool:
+    """Exempt static frontend assets and known open API paths."""
+    if path in _AUTH_EXEMPT:
+        return True
+    # Allow all static asset requests (JS, CSS, images, fonts)
+    static_exts = (".js", ".css", ".png", ".ico", ".svg", ".woff", ".woff2", ".html", ".json")
+    if any(path.endswith(ext) for ext in static_exts):
+        return True
+    # Allow root — serves index.html
+    if path == "/" or path == "":
+        return True
+    return False
 
 
 @asynccontextmanager
@@ -73,7 +88,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
-    if request.url.path in _AUTH_EXEMPT:
+    if _is_exempt(request.url.path):
         return await call_next(request)
     if not DOCMIND_API_KEY:
         return await call_next(request)
@@ -90,12 +105,24 @@ async def require_api_key(request: Request, call_next):
 app.include_router(documents.router)
 app.include_router(query.router)
 
-# On HF Spaces, serve the built React frontend as static files
+# On HF Spaces, serve the built React frontend as static files.
+# The Dockerfile copies frontend/dist into backend/static, so the
+# static folder sits alongside the app/ package inside /home/appuser/backend.
 if os.environ.get("HF_SPACE", "").lower() == "true":
     from fastapi.staticfiles import StaticFiles
-    _static = Path(__file__).parent.parent.parent / "static"
-    if _static.exists():
+    # Try multiple candidate paths to be resilient to working directory changes
+    _candidates = [
+        Path(__file__).parent.parent.parent / "static",  # backend/static from api/main.py
+        Path("/home/appuser/backend/static"),             # absolute path in container
+        Path("static"),                                   # relative to cwd
+    ]
+    _static = next((p for p in _candidates if p.exists()), None)
+    if _static:
+        print(f"Serving frontend from {_static}")
         app.mount("/", StaticFiles(directory=str(_static), html=True), name="static")
+    else:
+        print("WARNING: static folder not found, frontend will not be served")
+        print("Searched:", [str(p) for p in _candidates])
 
 
 @app.get("/health")
