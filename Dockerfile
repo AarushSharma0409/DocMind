@@ -20,19 +20,18 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # Build React frontend
 COPY --chown=appuser frontend/ ./frontend/
 WORKDIR /home/appuser/frontend
-RUN npm install && npm run build
+RUN npm install && npm run build && echo "Build complete" && ls -la dist/
 
 # Copy backend
 WORKDIR /home/appuser/backend
 COPY --chown=appuser backend/ .
 
-# Copy React build into /home/appuser/static
-# main.py looks for static/ at Path(__file__).parent.parent.parent / "static"
-# __file__ = /home/appuser/backend/app/api/main.py
-# .parent.parent.parent = /home/appuser/backend
-# so static must be at /home/appuser/backend/static
-# Copy dist CONTENTS into static/, not the dist folder itself
-RUN mkdir -p /home/appuser/backend/static && cp -r /home/appuser/frontend/dist/. /home/appuser/backend/static/
+# Copy React dist contents into backend/static/
+# Use shell form to verify the copy worked
+RUN mkdir -p /home/appuser/backend/static \
+    && cp -rv /home/appuser/frontend/dist/. /home/appuser/backend/static/ \
+    && echo "Static contents:" \
+    && ls -la /home/appuser/backend/static/
 
 ENV PATH="/home/appuser/.local/bin:${PATH}"
 ENV HF_SPACE=true

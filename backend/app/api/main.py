@@ -114,6 +114,15 @@ if os.environ.get("HF_SPACE", "").lower() == "true":
 
     _static = Path("/home/appuser/backend/static")
     print(f"Serving frontend from {_static} (exists={_static.exists()})")
+    # Debug: list contents so we can see what's actually there
+    try:
+        files = list(_static.iterdir()) if _static.exists() else []
+        print(f"static/ contents: {[f.name for f in files]}")
+        assets = _static / "assets"
+        if assets.exists():
+            print(f"assets/ contents: {[f.name for f in list(assets.iterdir())[:5]]}")
+    except Exception as e:
+        print(f"listing error: {e}")
 
     if _static.exists():
         # Mount static assets (JS, CSS, images) under /assets
